@@ -1024,8 +1024,9 @@ export function createCfojHttpServer() {
 export async function startServer(options = {}) {
   const port = Number(options.port ?? process.env.PORT ?? 4321);
   const host = options.host || '127.0.0.1';
-  // Ensure database is initialized and recover any interrupted judge jobs under their original IDs
+  // Ensure database is initialized, unpause queue on server startup, and recover any interrupted judge jobs under their original IDs
   getDb();
+  setQueuePaused(false);
   const recovered = recoverInterruptedSubmissions();
   const server = createCfojHttpServer();
 
