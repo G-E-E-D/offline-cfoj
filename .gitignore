@@ -1,0 +1,28 @@
+# Build output and binaries
+bin/
+dist/
+*.exe
+*.o
+*.out
+
+# User data, SQLite databases, downloaded contest archives, generated test suites, and private submissions
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Dependencies and runtime state
+node_modules/
+tmp/
+.cfoj-runtime/
+*.log
+
+# Credentials and local overrides
+.env
+.env.*
+*.key
+*.pem
+credentials.json
