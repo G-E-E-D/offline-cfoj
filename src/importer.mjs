@@ -555,6 +555,13 @@ function createAssetResolver(contestId, assetsDir, options = {}) {
 export async function translateSingleProblem(problemRow, options = {}) {
   const db = getDb();
   const providerName = options.provider || getSetting('ai_provider', 'codex');
+  const recordFailure = errMsg => {
+    // A failed retry must not hide a valid translation published by another job.
+    db.prepare(`UPDATE problems SET
+      translation_status = CASE WHEN translation_status='ready' AND statement_zh_json IS NOT NULL THEN 'ready' ELSE 'failed' END,
+      translation_error = ?, updated_at = ? WHERE id = ? AND statement_en_json IS ?`)
+      .run(errMsg, getNowMs(), problemRow.id, problemRow.statement_en_json);
+  };
 
   let enStmt = null;
   try {
@@ -585,8 +592,6 @@ export async function translateSingleProblem(problemRow, options = {}) {
         protectedFragments
       },
       schema: TRANSLATION_SCHEMA,
-      promptText:
-        'Translate all statement prose and section headings into Simplified Chinese while preserving math formulas, bounds, variable names, code blocks, literal output tokens, sample pairs, and figure references.',
       executableOverride: options.executableOverride || null,
       envOverride: options.envOverride || null
     });
@@ -597,16 +602,14 @@ export async function translateSingleProblem(problemRow, options = {}) {
       descriptionHtml: aiRes.data.descriptionHtml,
       inputSpecHtml: aiRes.data.inputSpecHtml,
       outputSpecHtml: aiRes.data.outputSpecHtml,
-      noteHtml: aiRes.data.noteHtml ?? enStmt.noteHtml ?? '',
+      noteHtml: aiRes.data.noteHtml,
       samples: aiRes.data.samples || enStmt.samples
     };
 
     const validation = validateTranslatedStatement(enStmt, candidateZh);
     if (!validation.valid) {
-      const errMsg = `Protected-fragment check failed: ${validation.errors.join('; ')}`;
-      db.prepare(
-        "UPDATE problems SET translation_status = 'failed', translation_error = ?, translation_provider = ?, updated_at = ? WHERE id = ?"
-      ).run(errMsg, aiRes.provider, getNowMs(), problemRow.id);
+      const errMsg = 'Translation validation failed: ' + validation.errors.join('; ');
+      recordFailure(errMsg);
       return { ok: false, error: errMsg, validation };
     }
 
@@ -618,34 +621,31 @@ export async function translateSingleProblem(problemRow, options = {}) {
       problemRow.problem_index
     );
     fs.mkdirSync(problemDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(problemDir, 'statement.zh-CN.json'),
-      JSON.stringify(candidateZh, null, 2),
-      'utf8'
-    );
-
-    db.prepare(
-      `UPDATE problems
-       SET title_zh = ?,
-           statement_zh_json = ?,
-           translation_status = 'ready',
-           translation_error = NULL,
-           translation_provider = ?,
-           updated_at = ?
-       WHERE id = ?`
-    ).run(
-      candidateZh.title,
-      JSON.stringify(candidateZh),
-      aiRes.provider,
-      getNowMs(),
-      problemRow.id
-    );
+    const target = path.join(problemDir, 'statement.zh-CN.json');
+    const temp = target + '.' + crypto.randomUUID() + '.tmp';
+    const json = JSON.stringify(candidateZh, null, 2);
+    try {
+      fs.writeFileSync(temp, json, { encoding: 'utf8', flag: 'wx' });
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const updated = db.prepare(`UPDATE problems SET title_zh=?, statement_zh_json=?,
+          translation_status='ready', translation_error=NULL, translation_provider=?, updated_at=?
+          WHERE id=? AND statement_en_json=?`)
+          .run(candidateZh.title, json, aiRes.provider, getNowMs(), problemRow.id, problemRow.statement_en_json);
+        if (!updated.changes) throw new Error('The English statement changed during translation. Retry with the current statement.');
+        fs.renameSync(temp, target);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      fs.rmSync(temp, { force: true });
+    }
 
     return { ok: true, statementZh: candidateZh, validation };
   } catch (err) {
-    db.prepare(
-      "UPDATE problems SET translation_status = 'failed', translation_error = ?, updated_at = ? WHERE id = ?"
-    ).run(err.message, getNowMs(), problemRow.id);
+    recordFailure(err.message);
     return { ok: false, error: err.message };
   }
 }

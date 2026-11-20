@@ -689,3 +689,16 @@ table.data-table tr.local-user-row td {
   border-color: var(--accent);
   color: #fff;
 }
+
+.provider-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.provider-location {
+  margin-top: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}

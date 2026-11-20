@@ -12,6 +12,7 @@ process.env.CFOJ_DATA_DIR = ISOLATED_TEST_DIR;
 fs.rmSync(ISOLATED_TEST_DIR, { recursive: true, force: true });
 
 const { DATA_DIR, ROOT_DIR, setSetting } = await import('../src/db.mjs');
+const { getFixtureExecutable } = await import('../src/providers.mjs');
 const { startServer } = await import('../src/server.mjs');
 
 const EDGE_PATH = fs.existsSync('C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe')
@@ -423,6 +424,8 @@ async function main() {
 
   // Set target_test_count to 10 in isolated test dir so multi-problem test generation runs quickly
   setSetting('target_test_count', '10');
+  setSetting('codex_bin', getFixtureExecutable('codex'));
+  setSetting('agy_bin', getFixtureExecutable('antigravity'));
 
   const mockCf = await startMockCfServer();
   const srv = await startServer({ port: 0 });
@@ -782,7 +785,7 @@ async function main() {
     // 4. Offline Reuse of Cached Statements (and automatic resumption of AI steps)
     // =========================================================================
     console.log('\n6. Testing Offline Reuse of Cached Statements for Contest 2283...');
-    setSetting('codex_bin', 'codex');
+    setSetting('codex_bin', getFixtureExecutable('codex'));
     setSetting('allow_fixture_fallback', 'true');
     setSetting('offline_mode', 'true');
 
@@ -804,7 +807,9 @@ async function main() {
     });
     assert.equal(offlineReimport.data.statementFetchSource, 'cache');
     const { data: prob2283AAfterOffline } = await apiJson(baseUrl, '/api/problems/2283A');
-    assert.equal(prob2283AAfterOffline.translationStatus, 'ready');
+    assert.equal(prob2283AAfterOffline.translationStatus, 'failed');
+    assert.match(prob2283AAfterOffline.translationError, /demo translator/);
+    assert.equal(prob2283AAfterOffline.statementZh, null);
     assert.equal(prob2283AAfterOffline.testPrepStatus, 'ready');
     assert.equal(prob2283AAfterOffline.editorialPrepStatus, 'ready');
 
@@ -823,7 +828,7 @@ async function main() {
       'cache',
       `Expected Contest 2272 cached HTML to reopen offline without CONTEST_MISMATCH, got: ${JSON.stringify(offlineReimport2272.data)}`
     );
-    console.log('   ✓ Cached statements for Contests 2283 and 2272 reused offline with zero network calls; AI translation, tests, and editorial resumed cleanly.');
+    console.log('   ✓ Cached statements reopened offline. Demo-only translation was reported unavailable for the new contest.');
 
     console.log('\n======================================================================');
     console.log('ALL CONTEST IMPORT & BROWSER EXTENSION WORKFLOW CHECKS PASSED!');

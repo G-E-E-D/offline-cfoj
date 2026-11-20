@@ -1985,15 +1985,19 @@ async function renderSubmissionsView() {
 // View 7: Settings & AI Providers
 async function renderSettingsView() {
   const main = document.getElementById('app-main');
-  const [{ data: statusData }, { data: provData }] = await Promise.all([
+  const [{ data: statusData }, { data: provData }, { data: catalogs }] = await Promise.all([
     apiFetch('/api/status'),
-    apiFetch('/api/providers/status')
+    apiFetch('/api/providers/status'),
+    apiFetch('/api/providers/models')
   ]);
 
   const s = statusData.settings || {};
   const jEnv = statusData.judgeEnvironment || {};
   const codex = provData.providers?.codex || {};
   const agy = provData.providers?.antigravity || {};
+  const chinese = state.lang === 'zh-CN';
+  const cliDefault = chinese ? '使用 CLI 默认值' : 'Use CLI default';
+  const modelProviders = [['codex', 'Codex', catalogs.codex], ['agy', 'Antigravity', catalogs.antigravity]];
 
   main.innerHTML = `
     <div class="hero-grid">
@@ -2014,7 +2018,7 @@ async function renderSettingsView() {
 
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">AI Provider Status (Codex &amp; Antigravity)</h2>
+          <h2 class="card-title">${chinese ? 'AI 提供商状态' : 'AI Provider Status'}</h2>
         </div>
         <div style="font-size:0.88rem;">
           <div style="padding:0.6rem;border:1px solid var(--border);border-radius:8px;margin-bottom:0.65rem;">
@@ -2022,14 +2026,14 @@ async function renderSettingsView() {
               <strong>OpenAI Codex (<code>codex exec</code>)</strong>
               <span class="badge ${codex.status === 'ready' ? 'badge-ok' : 'badge-warn'}">${escapeHtml(codex.status || 'unknown')}</span>
             </div>
-            <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.25rem;">${escapeHtml(codex.message || '')}</div>
+            <div class="provider-location">${escapeHtml(codex.message || '')}</div>
           </div>
           <div style="padding:0.6rem;border:1px solid var(--border);border-radius:8px;">
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <strong>Google Antigravity (<code>agy -p</code>)</strong>
               <span class="badge ${agy.status === 'ready' ? 'badge-ok' : 'badge-warn'}">${escapeHtml(agy.status || 'unknown')}</span>
             </div>
-            <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.25rem;">${escapeHtml(agy.message || '')}</div>
+            <div class="provider-location">${escapeHtml(agy.message || '')}</div>
           </div>
         </div>
       </div>
@@ -2037,24 +2041,39 @@ async function renderSettingsView() {
 
     <div class="card">
       <div class="card-header">
-        <h2 class="card-title">Configuration</h2>
+        <h2 class="card-title">${chinese ? '配置' : 'Configuration'}</h2>
       </div>
       <form id="settings-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
         <label style="display:flex;flex-direction:column;gap:0.35rem;">
-          <span>Active AI Provider</span>
+          <span>${chinese ? '默认 AI 提供商' : 'Active AI Provider'}</span>
           <select id="set-ai-provider">
             <option value="codex" ${s.ai_provider === 'codex' ? 'selected' : ''}>OpenAI Codex (codex exec)</option>
             <option value="antigravity" ${s.ai_provider === 'antigravity' ? 'selected' : ''}>Google Antigravity (agy -p)</option>
           </select>
         </label>
         <label style="display:flex;flex-direction:column;gap:0.35rem;">
-          <span>OpenAI Codex Executable Path</span>
+          <span>${chinese ? 'Codex 可执行文件' : 'OpenAI Codex executable'}</span>
           <input type="text" id="set-codex-bin" value="${escapeHtml(s.codex_bin || 'codex')}" />
         </label>
         <label style="display:flex;flex-direction:column;gap:0.35rem;">
-          <span>Google Antigravity Executable Path</span>
+          <span>${chinese ? 'Antigravity CLI 可执行文件' : 'Google Antigravity CLI executable'}</span>
           <input type="text" id="set-agy-bin" value="${escapeHtml(s.agy_bin || 'agy')}" />
         </label>
+        ${modelProviders.map(([prefix, name, catalog]) => `
+          <div class="provider-option">
+            <label for="set-${prefix}-model">${name} ${chinese ? '模型' : 'model'}</label>
+            <select id="set-${prefix}-model">
+              <option value="">${cliDefault}</option>
+              ${catalog.models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label || m.id)}</option>`).join('')}
+              <option value=":custom">${chinese ? '输入模型 ID…' : 'Enter model ID…'}</option>
+            </select>
+            <input id="set-${prefix}-custom-model" class="hidden" type="text"
+              aria-label="${name} model ID" placeholder="Model ID" value="${escapeHtml(s[prefix + '_model'])}" />
+          </div>
+          <label class="provider-option">${name} ${chinese ? '思考强度' : 'reasoning effort'}
+            <select id="set-${prefix}-effort"></select>
+          </label>
+        `).join('')}
         <label style="display:flex;flex-direction:column;gap:0.35rem;">
           <span>Target Generated Cases per Batch Problem</span>
           <input type="number" id="set-target-tests" value="${escapeHtml(s.target_test_count || '50')}" min="5" max="200" />
@@ -2071,13 +2090,38 @@ async function renderSettingsView() {
           </select>
         </label>
         <div style="grid-column:1 / -1;display:flex;gap:0.6rem;flex-wrap:wrap;">
-          <button type="submit" class="btn btn-primary">Save Settings</button>
+          <button type="submit" class="btn btn-primary">${chinese ? '保存设置' : 'Save Settings'}</button>
           <button type="button" id="use-fixture-providers-btn" class="btn">Use Repeatable Fixture Adapters (mock-codex / mock-agy)</button>
           <span id="settings-save-msg" class="badge badge-ok hidden">Saved!</span>
         </div>
       </form>
     </div>
   `;
+
+  for (const [prefix, , catalog] of modelProviders) {
+    const model = document.getElementById('set-' + prefix + '-model');
+    const custom = document.getElementById('set-' + prefix + '-custom-model');
+    const effort = document.getElementById('set-' + prefix + '-effort');
+    const savedModel = s[prefix + '_model'] || '';
+    model.value = savedModel && !catalog.models.some(m => m.id === savedModel) ? ':custom' : savedModel;
+    const showLevels = selected => {
+      custom.classList.toggle('hidden', model.value !== ':custom');
+      custom.required = model.value === ':custom';
+      const id = model.value === ':custom' ? custom.value.trim() : model.value;
+      const known = catalog.models.find(m => m.id === id)?.efforts;
+      const levels = known?.length ? known : catalog.efforts;
+      effort.replaceChildren(new Option(cliDefault, ''), ...levels.map(level => new Option(level, level)));
+      effort.value = levels.includes(selected) ? selected : '';
+    };
+    showLevels(s[prefix + '_effort']);
+    model.onchange = custom.oninput = () => showLevels(effort.value);
+    if (prefix === 'agy') effort.onchange = () => {
+      const item = catalog.models.find(m => m.id === model.value);
+      if (!item?.efforts?.includes(effort.value)) return;
+      const sibling = item.id.replace(/-[^-]+$/, '-' + effort.value);
+      if (catalog.models.some(m => m.id === sibling)) model.value = sibling;
+    };
+  }
 
   document.getElementById('use-fixture-providers-btn').onclick = () => {
     document.getElementById('set-codex-bin').value = provData.fixtures?.codex || 'codex';
@@ -2086,19 +2130,36 @@ async function renderSettingsView() {
 
   document.getElementById('settings-form').onsubmit = async (e) => {
     e.preventDefault();
-    await apiFetch('/api/settings', {
-      method: 'POST',
-      body: JSON.stringify({
-        ai_provider: document.getElementById('set-ai-provider').value,
-        codex_bin: document.getElementById('set-codex-bin').value.trim(),
-        agy_bin: document.getElementById('set-agy-bin').value.trim(),
-        target_test_count: document.getElementById('set-target-tests').value.trim(),
-        compiler_path: document.getElementById('set-compiler-path').value.trim(),
-        offline_mode: document.getElementById('set-offline-mode').value
-      })
-    });
-    await refreshSystemStatus();
-    await renderSettingsView();
+    const msg = document.getElementById('settings-save-msg');
+    const modelSettings = {};
+    for (const [prefix] of modelProviders) {
+      const selected = document.getElementById('set-' + prefix + '-model').value;
+      modelSettings[prefix + '_model'] = selected === ':custom'
+        ? document.getElementById('set-' + prefix + '-custom-model').value.trim() : selected;
+      modelSettings[prefix + '_effort'] = document.getElementById('set-' + prefix + '-effort').value;
+    }
+    try {
+      await apiFetch('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...modelSettings,
+          ai_provider: document.getElementById('set-ai-provider').value,
+          codex_bin: document.getElementById('set-codex-bin').value.trim(),
+          agy_bin: document.getElementById('set-agy-bin').value.trim(),
+          target_test_count: document.getElementById('set-target-tests').value.trim(),
+          compiler_path: document.getElementById('set-compiler-path').value.trim(),
+          offline_mode: document.getElementById('set-offline-mode').value
+        })
+      });
+      await refreshSystemStatus();
+      await renderSettingsView();
+      const saved = document.getElementById('settings-save-msg');
+      saved.textContent = chinese ? '设置已保存' : 'Settings saved';
+      saved.classList.remove('hidden');
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.className = 'badge badge-err';
+    }
   };
 }
 

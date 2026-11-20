@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const args = process.argv.slice(2);
+if (process.env.CFOJ_TEST_ARGV_FILE) fs.writeFileSync(process.env.CFOJ_TEST_ARGV_FILE, JSON.stringify(args));
 const mode = args[0] || 'codex'; // 'codex' or 'agy'
 
 if (args.includes('--version') || args.includes('-v')) {
@@ -142,14 +143,11 @@ function buildTranslationResponse(mat) {
     }
   };
 
-  const isContest4 = Number(mat.contestId || 4) === 4;
-  const chosen = (isContest4 && translations[idx]) || {
-    title: `${stmt.title || idx}（中文翻译）`,
-    descriptionHtml: `<p>【中文题面】</p>${stmt.descriptionHtml || '<p>题目描述</p>'}`,
-    inputSpecHtml: `<p>【输入格式】</p>${stmt.inputSpecHtml || '<p>输入说明</p>'}`,
-    outputSpecHtml: `<p>【输出格式】</p>${stmt.outputSpecHtml || '<p>输出说明</p>'}`,
-    noteHtml: stmt.noteHtml ? `<p>【说明】</p>${stmt.noteHtml}` : ''
-  };
+  const chosen = Number(mat.contestId) === 4 && translations[idx];
+  if (!chosen) {
+    process.stderr.write('The demo translator only contains translations for contest 4. Select a real AI CLI in Settings.\n');
+    process.exit(1);
+  }
 
   return {
     title: chosen.title,

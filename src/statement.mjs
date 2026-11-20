@@ -602,44 +602,67 @@ export function extractProtectedFragments(statement) {
   };
 }
 
+function proseBlocks(html) {
+  // Only visible prose is evidence of a translation. Formulas, code and
+  // attributes can legitimately contain English in either language.
+  const text = String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(code|pre|var|script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/\$\$\$[\s\S]*?\$\$\$/g, ' ')
+    .replace(/<\/(?:p|li|div|tr|td|th|h[1-6])>|<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '');
+  return decodeHtmlEntities(text).split(/\n+|(?<=[.!?])\s+(?=[A-Z])/)
+    .map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
 export function validateTranslatedStatement(enStatement, zhStatement) {
   const errors = [];
   if (!zhStatement || typeof zhStatement !== 'object') {
     return { valid: false, errors: ['Translation payload is empty or not an object'] };
   }
 
-  const zhCombined = [
-    zhStatement.title || '',
-    zhStatement.descriptionHtml || '',
-    zhStatement.inputSpecHtml || '',
-    zhStatement.outputSpecHtml || '',
-    zhStatement.noteHtml || ''
-  ].join('\n');
-
-  if (!/[\u4e00-\u9fff]/.test(zhCombined)) {
-    errors.push('Translated statement does not contain Simplified Chinese characters');
+  if (!zhStatement.title?.trim()) {
+    errors.push('Translated title is missing');
   }
-  if (!zhStatement.descriptionHtml || !zhStatement.inputSpecHtml || !zhStatement.outputSpecHtml) {
-    errors.push('Translated statement is missing required sections (description, inputSpec, or outputSpec)');
+  for (const field of ['descriptionHtml', 'inputSpecHtml', 'outputSpecHtml', 'noteHtml']) {
+    if (!enStatement[field]?.trim()) continue;
+    if (!zhStatement[field]?.trim()) {
+      errors.push(field + ': section missing from translation');
+      continue;
+    }
+    const original = proseBlocks(enStatement[field]);
+    const translated = proseBlocks(zhStatement[field]).join(' ')
+      .replace(/【(?:中文题面|输入说明|输入格式|输出说明|输出格式|说明)】/g, '').trim();
+    const originalText = original.join(' ');
+    const sentences = original.filter(s => (s.match(/\b[A-Za-z]+\b/g) || []).length >= 3 && /[a-z]{3}/.test(s));
+    // A formula or an output token can occupy a whole section. Require Chinese
+    // for natural-language instructions, and detect copied blocks even when
+    // the provider has translated a different paragraph of the same section.
+    const hasProse = sentences.length || /\b(?:print|output|given|return|contains?|find|calculate)\b/i.test(originalText);
+    const folded = translated.toLowerCase();
+    const copied = sentences.find(s => folded.includes(s.toLowerCase()));
+    if (hasProse && (!/\p{Script=Han}/u.test(translated) || copied)) {
+      errors.push(field + ': untranslated English prose' + (copied ? ' — ' + copied.slice(0, 90) : ''));
+    }
   }
 
   const protectedFrags = extractProtectedFragments(enStatement);
-  const normalizedZh = zhCombined.replace(/\s+/g, ' ');
+  const translatedFragments = extractProtectedFragments(zhStatement);
 
   for (const expr of protectedFrags.math) {
-    if (!normalizedZh.includes(expr)) {
+    if (!translatedFragments.math.includes(expr)) {
       errors.push(`Protected math formula missing or altered in translation: $$$${expr}$$$`);
     }
   }
 
   for (const tok of protectedFrags.codeTokens) {
-    if (!zhCombined.includes(tok)) {
+    if (!translatedFragments.codeTokens.includes(tok)) {
       errors.push(`Protected literal token/code '${tok}' missing in translation`);
     }
   }
 
   for (const imgSrc of protectedFrags.images) {
-    if (!zhCombined.includes(imgSrc)) {
+    if (!translatedFragments.images.includes(imgSrc)) {
       errors.push(`Protected figure/image reference '${imgSrc}' missing in translation`);
     }
   }
@@ -650,7 +673,7 @@ export function validateTranslatedStatement(enStatement, zhStatement) {
     errors.push(`Sample count mismatch: expected ${enSamples.length}, got ${zhSamples.length}`);
   } else {
     for (let i = 0; i < enSamples.length; i++) {
-      if (zhSamples[i].input !== enSamples[i].input || zhSamples[i].output !== enSamples[i].output) {
+      if (zhSamples[i]?.input !== enSamples[i].input || zhSamples[i]?.output !== enSamples[i].output) {
         errors.push(`Sample #${i + 1} data was modified during translation`);
       }
     }

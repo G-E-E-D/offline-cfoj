@@ -33,7 +33,9 @@ import {
   TRANSLATION_SCHEMA,
   checkProviderStatus,
   getFixtureExecutable,
-  runProviderStructuredJob
+  getModelOptions,
+  runProviderStructuredJob,
+  validateModelSettings
 } from './providers.mjs';
 import {
   getActiveContestVp,
@@ -402,6 +404,12 @@ export function createCfojHttpServer() {
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/providers/models') {
+        const [codex, antigravity] = await Promise.all([getModelOptions('codex'), getModelOptions('antigravity')]);
+        sendJson(res, 200, { codex, antigravity });
+        return;
+      }
+
       // Provider self-test endpoint
       if (req.method === 'POST' && pathname === '/api/providers/test') {
         const body = await readJsonBody(req);
@@ -439,9 +447,19 @@ export function createCfojHttpServer() {
       // Update Settings
       if (req.method === 'POST' && pathname === '/api/settings') {
         const body = await readJsonBody(req);
+        try {
+          validateModelSettings(body);
+        } catch (err) {
+          sendJson(res, 400, { error: err.message });
+          return;
+        }
         const allowedKeys = [
           'ui_language',
           'ai_provider',
+          'codex_model',
+          'codex_effort',
+          'agy_model',
+          'agy_effort',
           'codex_bin',
           'agy_bin',
           'target_test_count',

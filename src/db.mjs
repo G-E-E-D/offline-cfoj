@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateTranslatedStatement } from './statement.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(__dirname, '..');
@@ -188,6 +189,10 @@ export function getDb() {
   const defaults = {
     ui_language: 'en',
     ai_provider: 'codex',
+    codex_model: '',
+    codex_effort: '',
+    agy_model: '',
+    agy_effort: '',
     codex_bin: process.env.CFOJ_CODEX_BIN || 'codex',
     agy_bin: process.env.CFOJ_AGY_BIN || 'agy',
     target_test_count: '50',
@@ -203,6 +208,26 @@ export function getDb() {
     insertSetting.run(k, v, now);
   }
 
+  // Old versions marked an English copy with a Chinese heading as ready.
+  // Recheck once so all readers and the ordinary re-import/repair paths agree.
+  if (db.prepare('PRAGMA user_version').get().user_version < 1) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const stale = db.prepare("UPDATE problems SET translation_status='failed', translation_error=?, title_zh=NULL, statement_zh_json=NULL WHERE id=?");
+      const rows = db.prepare("SELECT id, statement_en_json, statement_zh_json FROM problems WHERE translation_status='ready'").all();
+      for (const row of rows) {
+        let valid = false;
+        try {
+          valid = validateTranslatedStatement(JSON.parse(row.statement_en_json), JSON.parse(row.statement_zh_json)).valid;
+        } catch { /* A damaged legacy translation also needs regeneration. */ }
+        if (!valid) stale.run('旧译文未通过校验，请重新生成中文题面。 / Regenerate this translation.', row.id);
+      }
+      db.exec('PRAGMA user_version = 1; COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   dbInstance = db;
   return db;
 }
