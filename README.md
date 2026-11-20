@@ -62,7 +62,11 @@ Provider credentials always remain with their respective CLI tools (`codex login
   ```
 - Each AI job runs inside an isolated temporary directory containing only `problem-materials.json` and `schema.json` for that single problem task. Structured outputs are schema-validated before saving.
 - **Repeatable Fixture Adapters:** When `codex` or `agy` is not installed or signed in, Offline CFOJ includes repeatable CLI fixture executables (`fixtures\providers\mock-codex.cmd` and `fixtures\providers\mock-agy.cmd`) that speak the exact `codex exec` and `agy -p` CLI flags and JSON schemas, plus deterministic failure injection via `CFOJ_MOCK_PROVIDER_FAIL` (`auth_error`, `version_error`, `malformed_json`, `corrupt_fragments`, `oracle_disagreement`).
-- **Cloudflare / Offline HTML Import Fallback:** If Codeforces gates `/contest/<id>/problems` behind an anti-bot challenge, Offline CFOJ never attempts to bypass the CAPTCHA; you can save the contest problems page (`Ctrl+S`) from your own browser and upload the `.html` file directly in the **Import a Round** card, or use the bundled offline fixture (`fixtures\codeforces\contest4\`).
+- **Cloudflare / Browser Extension One-Click Import (`C:\YX\ICPC\oj\extension`):**
+  - By default, Offline CFOJ fetches `/contest/<id>/problems?locale=en` directly over HTTP, validates that all expected problem indices from the contest metadata are present, and caches the statements.
+  - When Codeforces returns a browser challenge (`cf-mitigated: challenge`), Offline CFOJ distinguishes it from rate limiting (`429`), ordinary access denial (`403`/`401`), network failure, and parsing errors. It preserves the pending contest import (`status = 'awaiting_browser'`), binds a short-lived (15-minute), single-use token to that contest ID, and displays a bilingual **"Continue in browser" / "在浏览器中继续"** button.
+  - Load the unpacked Chrome/Edge extension from `C:\YX\ICPC\oj\extension`. After completing verification in your browser so the statements are visible, click **"Send this contest to CFOJ" / "发送本场比赛至 CFOJ"** once (either from the floating button on the Codeforces page or the extension toolbar popup) to transfer only the displayed contest material to `http://127.0.0.1:4321/api/browser-import/receive` and automatically resume translation, test generation, and editorial preparation.
+  - Manual HTML upload (`problems.html`) remains available as a fallback on both the Contests dashboard and the Contest page.
 
 ---
 

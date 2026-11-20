@@ -142,12 +142,13 @@ function buildTranslationResponse(mat) {
     }
   };
 
-  const chosen = translations[idx] || {
+  const isContest4 = Number(mat.contestId || 4) === 4;
+  const chosen = (isContest4 && translations[idx]) || {
     title: `${stmt.title || idx}（中文翻译）`,
-    descriptionHtml: `<p>【中文题面】</p>${stmt.descriptionHtml || ''}`,
-    inputSpecHtml: `<p>【输入说明】</p>${stmt.inputSpecHtml || ''}`,
-    outputSpecHtml: `<p>【输出说明】</p>${stmt.outputSpecHtml || ''}`,
-    noteHtml: stmt.noteHtml || ''
+    descriptionHtml: `<p>【中文题面】</p>${stmt.descriptionHtml || '<p>题目描述</p>'}`,
+    inputSpecHtml: `<p>【输入格式】</p>${stmt.inputSpecHtml || '<p>输入说明</p>'}`,
+    outputSpecHtml: `<p>【输出格式】</p>${stmt.outputSpecHtml || '<p>输出说明</p>'}`,
+    noteHtml: stmt.noteHtml ? `<p>【说明】</p>${stmt.noteHtml}` : ''
   };
 
   return {
@@ -163,6 +164,78 @@ function buildTranslationResponse(mat) {
 function buildTestSuiteResponse(mat) {
   const idx = String(mat.problemIndex || 'A').toUpperCase();
   const disagree = failMode === 'oracle_disagreement';
+  const isContest4 = Number(mat.contestId || 4) === 4;
+
+  if (!isContest4) {
+    const samples = mat.statement?.samples?.length ? mat.statement.samples : [{ input: '1\n', output: '1\n' }];
+    const cppPairs = samples
+      .map(
+        (s) =>
+          `{${JSON.stringify(String(s.input || '').replace(/\r\n/g, '\n').trimEnd())}, ${JSON.stringify(String(s.output || '').replace(/\r\n/g, '\n').trimEnd())}}`
+      )
+      .join(',\n        ');
+    const solverCpp = `#include <bits/stdc++.h>
+int main() {
+    std::ostringstream ss;
+    ss << std::cin.rdbuf();
+    std::string in = ss.str();
+    std::string norm;
+    for (char c : in) if (c != '\\r') norm.push_back(c);
+    while (!norm.empty() && (norm.back() == '\\n' || norm.back() == ' ')) norm.pop_back();
+    const std::vector<std::pair<std::string, std::string>> samples = {
+        ${cppPairs}
+    };
+    for (const auto& [sin, sout] : samples) {
+        std::string s = sin;
+        while (!s.empty() && (s.back() == '\\n' || s.back() == ' ')) s.pop_back();
+        if (norm == s) {
+            std::cout << sout << "\\n";
+            return 0;
+        }
+    }
+    std::cout << norm << "\\n";
+    return 0;
+}`;
+    const seeds = [];
+    for (let i = 1; i <= 55; i++) {
+      seeds.push({
+        seed: i,
+        category: i === 1 ? 'minimum' : i === 2 ? 'maximum' : i <= 10 ? 'boundary' : 'special_structure'
+      });
+    }
+    return {
+      planSummary: `Deterministic test suite for ${mat.contestId}${idx} (${mat.title || idx}).`,
+      checkerType: 'token',
+      checkerEps: 1e-6,
+      checkerCpp: '',
+      checkerSelfTests: [],
+      generatorCpp: `#include <bits/stdc++.h>
+int main(int argc, char* argv[]) {
+    int seed = (argc > 1) ? std::atoi(argv[1]) : 1;
+    std::println("{}", 100000 + seed);
+    return 0;
+}`,
+      validatorCpp: `#include <bits/stdc++.h>
+int main() {
+    std::string tok;
+    if (!(std::cin >> tok)) return 1;
+    return 0;
+}`,
+      referenceCpp: solverCpp,
+      oracleCpp: solverCpp,
+      wrongSolutions: [
+        {
+          name: 'wrong_constant_output',
+          expectedVerdict: 'WA',
+          sourceCpp: `#include <bits/stdc++.h>
+int main() {
+    std::println("__WRONG_ANSWER_SENTINEL__");
+}`
+        }
+      ],
+      seeds
+    };
+  }
 
   if (idx === 'A') {
     const seeds = [];
@@ -885,6 +958,49 @@ int main() {
 function buildEditorialResponse(mat) {
   const idx = String(mat.problemIndex || 'D').toUpperCase();
   const hasPublished = Boolean(mat.publishedHtml && mat.publishedHtml.trim());
+  const isContest4 = Number(mat.contestId || 4) === 4;
+
+  if (!isContest4) {
+    const samples = mat.statement?.samples?.length ? mat.statement.samples : [{ input: '1\n', output: '1\n' }];
+    const cppPairs = samples
+      .map(
+        (s) =>
+          `{${JSON.stringify(String(s.input || '').replace(/\r\n/g, '\n').trimEnd())}, ${JSON.stringify(String(s.output || '').replace(/\r\n/g, '\n').trimEnd())}}`
+      )
+      .join(',\n        ');
+    return {
+      sourceType: hasPublished ? 'published' : 'ai',
+      attributionEn: `AI-Generated Editorial via ${providerLabel}`,
+      attributionZh: `AI 生成题解（由 ${providerLabel} 提供）`,
+      algorithmEn: `Direct constructive and dynamic analysis for problem ${mat.contestId}${idx}.`,
+      correctnessEn: 'Follows directly from the problem constraints and invariant properties.',
+      complexityEn: 'Time complexity: $O(n)$. Space complexity: $O(n)$.',
+      markdownEn: `### Algorithm & Analysis\n\nSolve problem **${mat.contestId}${idx} (${mat.title || idx})** within the ${mat.timeLimitMs || 2000} ms time limit.`,
+      markdownZh: `### 算法分析\n\n在 ${mat.timeLimitMs || 2000} ms 时间限制内求解 **${mat.contestId}${idx} (${mat.title || idx})**。`,
+      solutionCpp: `#include <bits/stdc++.h>
+int main() {
+    std::ostringstream ss;
+    ss << std::cin.rdbuf();
+    std::string in = ss.str();
+    std::string norm;
+    for (char c : in) if (c != '\\r') norm.push_back(c);
+    while (!norm.empty() && (norm.back() == '\\n' || norm.back() == ' ')) norm.pop_back();
+    const std::vector<std::pair<std::string, std::string>> samples = {
+        ${cppPairs}
+    };
+    for (const auto& [sin, sout] : samples) {
+        std::string s = sin;
+        while (!s.empty() && (s.back() == '\\n' || s.back() == ' ')) s.pop_back();
+        if (norm == s) {
+            std::cout << sout << "\\n";
+            return 0;
+        }
+    }
+    std::cout << norm << "\\n";
+    return 0;
+}`
+    };
+  }
 
   if (idx === 'A') {
     return {

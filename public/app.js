@@ -95,6 +95,15 @@ const I18N = {
     filterSearch: 'Search title or ID...',
     applyFilterBtn: 'Filter',
     resetFilterBtn: 'Reset',
+    browserVerifyTitle: 'Human Verification Required in Browser (Cloudflare Challenge)',
+    browserVerifyDesc: 'Contest metadata was imported, but Codeforces returned a browser challenge (cf-mitigated: challenge) for the problems page. Click "Continue in browser" to open the official contest problems page, complete verification until you see the statements, then click "Send this contest to CFOJ" in the extension.',
+    continueInBrowserBtn: 'Continue in browser',
+    fallbackUploadBtn: 'Fallback: Upload Saved problems.html',
+    errCat_browser_challenge: 'Browser Verification Challenge (cf-mitigated: challenge)',
+    errCat_rate_limited: 'Rate Limited by Codeforces (HTTP 429)',
+    errCat_access_denied: 'Access Denied (HTTP 403/401 — Not a Browser Challenge)',
+    errCat_network_failure: 'Network Connection Failure',
+    errCat_parse_error: 'Statement Parsing / Problem List Validation Error',
     verdicts: {
       QUEUED: '[QUEUED] In Queue',
       COMPILING: '[COMPILING] Compiling GNU C++23...',
@@ -206,6 +215,15 @@ const I18N = {
     filterSearch: '搜索题目名称或题号...',
     applyFilterBtn: '筛选',
     resetFilterBtn: '重置',
+    browserVerifyTitle: '需要在浏览器中完成人工验证 (Cloudflare 验证挑战)',
+    browserVerifyDesc: '比赛元数据已成功导入，但 Codeforces 对题面页返回了浏览器验证挑战 (cf-mitigated: challenge)。请点击下方“在浏览器中继续”打开官方完整题面页，完成验证并看到题目题面后，点击扩展按钮“发送本场比赛至 CFOJ”即可一键回传并自动继续准备。',
+    continueInBrowserBtn: '在浏览器中继续 (Continue in browser)',
+    fallbackUploadBtn: '备用方案：手动上传已保存的 problems.html',
+    errCat_browser_challenge: '浏览器人工验证挑战 (cf-mitigated: challenge)',
+    errCat_rate_limited: '服务器请求限流 (HTTP 429)',
+    errCat_access_denied: '访问被拒绝 (HTTP 403/401 — 非浏览器验证挑战)',
+    errCat_network_failure: '网络连接失败',
+    errCat_parse_error: '题面解析或题号列表校验错误',
     verdicts: {
       QUEUED: '[QUEUED] 排队等待中',
       COMPILING: '[COMPILING] 正在编译 GNU C++23...',
@@ -699,7 +717,11 @@ async function renderContestsDashboard() {
           })
         });
         await refreshSystemStatus();
-        location.hash = `#/contest/${data.contestId || cid}`;
+        if (data.status === 'awaiting_browser' || data.contestId) {
+          location.hash = `#/contest/${data.contestId || cid}`;
+          return;
+        }
+        location.hash = `#/contest/${cid}`;
       } catch (err) {
         progBox.innerHTML = `<div class="alert alert-err">${escapeHtml(err.message)}</div>`;
         btn.disabled = false;
@@ -733,8 +755,21 @@ function renderContestViewFromData(contest) {
           : st === 'running'
             ? 'badge-info'
             : 'badge-warn';
-    return `<span class="badge ${cls}" title="${escapeHtml(stObj?.error || st)}">${label}: ${st.toUpperCase()}</span>`;
+    const disp = st === 'awaiting_browser'
+      ? (state.lang === 'zh-CN' ? '待浏览器验证' : 'AWAITING BROWSER')
+      : st.toUpperCase();
+    return `<span class="badge ${cls}" title="${escapeHtml(stObj?.error || st)}">${label}: ${disp}</span>`;
   };
+
+  const bVer = contest.browserVerification || contest.lastImportJob?.steps?.browserVerification || null;
+  const lastErrCat = contest.lastImportJob?.steps?.errorCategory || null;
+  const lastErrMsg =
+    state.lang === 'zh-CN'
+      ? contest.lastImportJob?.steps?.errorMessageZh || contest.lastImportJob?.error
+      : contest.lastImportJob?.steps?.errorMessage || contest.lastImportJob?.error;
+  const continueHref = bVer
+    ? `${bVer.targetUrl}#cfoj_token=${encodeURIComponent(bVer.token)}&cfoj_contest=${encodeURIComponent(contest.contestId)}&cfoj_origin=${encodeURIComponent(location.origin)}`
+    : `https://codeforces.com/contest/${contest.contestId}/problems?locale=en`;
 
   main.innerHTML = `
     <div class="card">
@@ -773,6 +808,44 @@ function renderContestViewFromData(contest) {
           <button type="button" id="reimport-contest-btn" class="btn btn-sm">${t('reimportBtn')}</button>
         </div>
       </div>
+
+      ${
+        contest.awaitingBrowserVerification && bVer
+          ? `<div class="alert alert-warn" id="browser-verification-panel" style="margin-top:0.85rem;">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:0.85rem;">
+                <div style="flex:1;min-width:280px;">
+                  <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.35rem;">
+                    <strong>${t('browserVerifyTitle')}</strong>
+                    <span class="badge badge-warn">cf-mitigated: challenge</span>
+                    <span class="badge">Expected: ${escapeHtml((bVer.expectedIndices || []).join(', '))}</span>
+                  </div>
+                  <div style="font-size:0.88rem;line-height:1.55;">${t('browserVerifyDesc')}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:0.45rem;align-items:flex-end;">
+                  <a
+                    href="${escapeHtml(continueHref)}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    id="continue-in-browser-btn"
+                    data-target-url="${escapeHtml(continueHref)}"
+                    data-token="${escapeHtml(bVer.token)}"
+                    class="btn btn-primary"
+                  >
+                    ${t('continueInBrowserBtn')} &nearr;
+                  </a>
+                  <label class="btn btn-sm" style="cursor:pointer;">
+                    <span>${t('fallbackUploadBtn')}</span>
+                    <input type="file" id="contest-fallback-html-file" accept=".html,.htm" class="hidden" />
+                  </label>
+                </div>
+              </div>
+            </div>`
+          : lastErrCat && lastErrCat !== 'browser_challenge' && !contest.offlineReady
+            ? `<div class="alert alert-err" id="import-error-category-banner" data-error-category="${escapeHtml(lastErrCat)}" style="margin-top:0.85rem;">
+                <div><strong>${escapeHtml(t('errCat_' + lastErrCat) || lastErrCat)}:</strong> ${escapeHtml(lastErrMsg || '')}</div>
+              </div>`
+            : ''
+      }
 
       ${
         vpToShow
@@ -1058,6 +1131,23 @@ function renderContestViewFromData(contest) {
       await loadAndRenderContestView(contest.contestId);
     };
   });
+
+  const fallbackHtmlInput = document.getElementById('contest-fallback-html-file');
+  if (fallbackHtmlInput) {
+    fallbackHtmlInput.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const htmlText = await file.text();
+      await apiFetch('/api/contests/import', {
+        method: 'POST',
+        body: JSON.stringify({
+          contestId: contest.contestId,
+          uploadedProblemsHtml: htmlText
+        })
+      });
+      await loadAndRenderContestView(contest.contestId);
+    };
+  }
 }
 
 // View 3: Problem Workspace (Bilingual Statement, Samples Copy, C++23 Editor, Sample/Custom Runner, Judge Submission)
@@ -2094,6 +2184,11 @@ function connectSseEvents() {
       } else if (msg.type === 'vpFinalized') {
         refreshSystemStatus();
         if (location.hash.startsWith('#/contest/')) {
+          handleRouteChange();
+        }
+      } else if (msg.type === 'browserTransferReceived' || (msg.type === 'importProgress' && msg.progress?.status === 'completed')) {
+        refreshSystemStatus();
+        if (location.hash.startsWith('#/contest/') || location.hash === '#/contests') {
           handleRouteChange();
         }
       }

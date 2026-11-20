@@ -199,6 +199,126 @@ export function isCloudflareChallengeHtml(html) {
   );
 }
 
+export function hasCfMitigatedChallengeHeader(headers) {
+  if (!headers) return false;
+  let val = '';
+  if (typeof headers.get === 'function') {
+    val = headers.get('cf-mitigated') || '';
+  } else if (typeof headers === 'object') {
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() === 'cf-mitigated') {
+        val = String(v || '');
+        break;
+      }
+    }
+  }
+  return val.toLowerCase().includes('challenge');
+}
+
+export function isCloudflareChallengeResponse(html, headers = null) {
+  return hasCfMitigatedChallengeHeader(headers) || isCloudflareChallengeHtml(html);
+}
+
+export function validateParsedContestProblems({
+  html = '',
+  parsedHtml,
+  expectedContestId,
+  expectedIndices = [],
+  sourceUrl = ''
+}) {
+  const expId = Number(expectedContestId);
+
+  // 1. Check sourceUrl contest ID if present
+  if (sourceUrl) {
+    const urlMatch = String(sourceUrl).match(/codeforces\.com\/(?:contest|gym)\/(\d+)/i);
+    if (urlMatch) {
+      const urlContestId = Number(urlMatch[1]);
+      if (urlContestId !== expId) {
+        return {
+          ok: false,
+          code: 'CONTEST_MISMATCH',
+          category: 'parse_error',
+          detectedContestId: urlContestId,
+          error: `Contest ID mismatch: expected contest #${expId}, but source URL belongs to contest #${urlContestId}.`,
+          errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但来源页面属于比赛 #${urlContestId}。`
+        };
+      }
+    }
+  }
+
+  // 2. Check explicit contest ID attributes or links inside HTML
+  if (html) {
+    const attrMatch = html.match(/\bdata-contest-id=["'](\d+)["']/i);
+    if (attrMatch && Number(attrMatch[1]) !== expId) {
+      const foundId = Number(attrMatch[1]);
+      return {
+        ok: false,
+        code: 'CONTEST_MISMATCH',
+        category: 'parse_error',
+        detectedContestId: foundId,
+        error: `Contest ID mismatch: expected contest #${expId}, but HTML document is tagged for contest #${foundId}.`,
+        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面内容标记为比赛 #${foundId}。`
+      };
+    }
+
+    const linkIds = new Set();
+    for (const m of html.matchAll(/href=["'](?:https?:\/\/codeforces\.com)?\/(?:contest|gym)\/(\d+)(?:\/[^"']*)?["']/gi)) {
+      linkIds.add(Number(m[1]));
+    }
+    if (linkIds.size > 0 && !linkIds.has(expId)) {
+      const otherId = [...linkIds][0];
+      return {
+        ok: false,
+        code: 'CONTEST_MISMATCH',
+        category: 'parse_error',
+        detectedContestId: otherId,
+        error: `Contest ID mismatch: expected contest #${expId}, but HTML links belong to contest #${otherId}.`,
+        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面内链接属于比赛 #${otherId}。`
+      };
+    }
+  }
+
+  // 3. Check parsed problems list
+  const problems = parsedHtml?.problems || [];
+  if (problems.length === 0) {
+    return {
+      ok: false,
+      code: 'PARSE_ERROR',
+      category: 'parse_error',
+      error: `No problem statements (.problem-statement) were found in the HTML document for contest #${expId}.`,
+      errorZh: `未在 HTML 页面中解析到比赛 #${expId} 的任何题目题面 (.problem-statement)。`
+    };
+  }
+
+  const foundIndices = problems.map((p) => String(p.problemIndex).toUpperCase());
+  const foundSet = new Set(foundIndices);
+
+  // 4. Verify all expected problem indices are present
+  const normExpected = (expectedIndices || [])
+    .map((x) => String(x).toUpperCase().trim())
+    .filter(Boolean);
+
+  if (normExpected.length > 0) {
+    const missingIndices = normExpected.filter((idx) => !foundSet.has(idx));
+    if (missingIndices.length > 0) {
+      return {
+        ok: false,
+        code: 'MISSING_PROBLEM_INDICES',
+        category: 'parse_error',
+        missingIndices,
+        foundIndices,
+        error: `Problems page for contest #${expId} is incomplete: missing expected problem indices [${missingIndices.join(', ')}] (found [${foundIndices.join(', ')}]). Make sure the full contest problems page (/contest/${expId}/problems) is loaded.`,
+        errorZh: `比赛 #${expId} 题面不完整：缺少预期题号 [${missingIndices.join(', ')}]（当前仅发现 [${foundIndices.join(', ')}]）。请确认已打开完整比赛题面页 (/contest/${expId}/problems)。`
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    foundIndices
+  };
+}
+
 export function parseSingleProblemStatementDom(stmtInnerHtml, fallbackIndex = 'A') {
   const headerBox = extractBalancedDivByClass(stmtInnerHtml, 'header');
   const headerInner = headerBox ? headerBox.inner : '';

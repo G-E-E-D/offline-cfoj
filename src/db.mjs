@@ -171,6 +171,18 @@ export function getDb() {
       started_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS browser_transfer_tokens (
+      token TEXT PRIMARY KEY,
+      contest_id INTEGER NOT NULL,
+      expected_indices_json TEXT NOT NULL DEFAULT '[]',
+      provider TEXT NOT NULL DEFAULT 'codex',
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_browser_tokens_contest ON browser_transfer_tokens(contest_id, created_at DESC);
   `);
 
   const defaults = {

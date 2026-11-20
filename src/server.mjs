@@ -12,9 +12,13 @@ import {
   setSetting
 } from './db.mjs';
 import {
+  ensureBrowserTransferTokenForPendingContest,
+  getActiveBrowserTransferToken,
   getContestReadinessSummary,
   importContest,
+  issueBrowserTransferToken,
   parseContestIdInput,
+  receiveBrowserContestTransfer,
   repairProblemStage
 } from './importer.mjs';
 import {
@@ -58,13 +62,29 @@ const MIME_TYPES = {
   '.md': 'text/markdown; charset=utf-8'
 };
 
-function sendJson(res, statusCode, payload) {
+function isLoopbackRemoteAddress(addr) {
+  if (!addr) return false;
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    ...extraHeaders
   });
   res.end(body);
+}
+
+function getBrowserImportCorsHeaders(req) {
+  const origin = req.headers.origin || '*';
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-CFOJ-Token',
+    'Access-Control-Allow-Private-Network': 'true'
+  };
 }
 
 function readJsonBody(req, maxBytes = 8 * 1024 * 1024) {
@@ -198,14 +218,126 @@ export function createCfojHttpServer() {
     }
   };
 
+  const onBrowserTransfer = (ev) => {
+    const payload = JSON.stringify({ type: 'browserTransferReceived', ...ev });
+    for (const client of sseClients) {
+      client.write(`data: ${payload}\n\n`);
+    }
+  };
+
   judgeEvents.on('submissionUpdate', onSubUpdate);
   judgeEvents.on('importProgress', onImportProgress);
   judgeEvents.on('vpFinalized', onVpFinalized);
+  judgeEvents.on('browserTransferReceived', onBrowserTransfer);
 
   const server = http.createServer(async (req, res) => {
     try {
       const parsedUrl = new URL(req.url, 'http://127.0.0.1');
       const pathname = decodeURIComponent(parsedUrl.pathname);
+
+      // Loopback-only Browser Extension Transfer endpoints + CORS preflight
+      if (pathname.startsWith('/api/browser-import/')) {
+        const corsHeaders = getBrowserImportCorsHeaders(req);
+        if (!isLoopbackRemoteAddress(req.socket?.remoteAddress)) {
+          sendJson(
+            res,
+            403,
+            {
+              ok: false,
+              code: 'LOOPBACK_ONLY',
+              error: 'Browser transfer receiver accepts loopback (127.0.0.1) connections only.'
+            },
+            corsHeaders
+          );
+          return;
+        }
+
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, corsHeaders);
+          res.end();
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/browser-import/token') {
+          const body = await readJsonBody(req);
+          const contestId = parseContestIdInput(body.contestId);
+          const db = getDb();
+          const probs = db
+            .prepare('SELECT problem_index FROM problems WHERE contest_id = ? ORDER BY sort_order ASC')
+            .all(contestId);
+          const expectedIndices = Array.isArray(body.expectedIndices) && body.expectedIndices.length
+            ? body.expectedIndices
+            : probs.map((p) => p.problem_index.toUpperCase());
+          const tokenInfo = issueBrowserTransferToken(
+            contestId,
+            expectedIndices,
+            body.provider || null,
+            body.ttlMs || undefined
+          );
+          sendJson(res, 200, { ok: true, ...tokenInfo }, corsHeaders);
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/browser-import/pending') {
+          const db = getDb();
+          const qContestId = parsedUrl.searchParams.get('contestId');
+          if (qContestId) {
+            const cid = parseInt(qContestId, 10);
+            const activeTok = getActiveBrowserTransferToken(cid);
+            const awaitingRow = db
+              .prepare(
+                "SELECT 1 FROM problems WHERE contest_id = ? AND fetch_status = 'awaiting_browser' LIMIT 1"
+              )
+              .get(cid);
+            if (!activeTok && !awaitingRow) {
+              sendJson(
+                res,
+                404,
+                {
+                  ok: false,
+                  code: 'NO_PENDING_IMPORT',
+                  error: `No pending browser import for contest #${cid}. Start the import in CFOJ first.`
+                },
+                corsHeaders
+              );
+              return;
+            }
+            const tokInfo = activeTok || ensureBrowserTransferTokenForPendingContest(cid);
+            sendJson(res, 200, { ok: true, pending: tokInfo }, corsHeaders);
+            return;
+          }
+
+          // Return most recent active token if no contestId specified
+          const row = db
+            .prepare(
+              'SELECT contest_id FROM browser_transfer_tokens WHERE used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1'
+            )
+            .get(getNowMs());
+          if (!row) {
+            sendJson(res, 404, { ok: false, code: 'NO_PENDING_IMPORT', error: 'No pending browser import.' }, corsHeaders);
+            return;
+          }
+          const tokInfo = getActiveBrowserTransferToken(row.contest_id);
+          sendJson(res, 200, { ok: true, pending: tokInfo }, corsHeaders);
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/browser-import/receive') {
+          const body = await readJsonBody(req, 16 * 1024 * 1024);
+          const token = req.headers['x-cfoj-token'] || body.token || '';
+          const result = await receiveBrowserContestTransfer({
+            token: String(token),
+            contestId: body.contestId ?? null,
+            pageUrl: body.pageUrl || '',
+            html: body.html || '',
+            assets: Array.isArray(body.assets) ? body.assets : [],
+            awaitPreparation: body.awaitPreparation !== false,
+            importOptions: body.importOptions || {}
+          });
+          sendJson(res, result.status || (result.ok ? 200 : 400), result, corsHeaders);
+          return;
+        }
+      }
 
       // Server-Sent Events stream
       if (req.method === 'GET' && pathname === '/api/events') {
@@ -388,30 +520,32 @@ export function createCfojHttpServer() {
 
       // Import a contest by numeric ID
       if (req.method === 'POST' && pathname === '/api/contests/import') {
-        const body = await readJsonBody(req);
+        const body = await readJsonBody(req, 16 * 1024 * 1024);
         const contestId = parseContestIdInput(body.contestId);
         const awaitCompletion = body.awaitCompletion !== false;
+        const importOpts = {
+          provider: body.provider,
+          useFixture: Boolean(body.useFixture),
+          forceRegenerate: Boolean(body.forceRegenerate),
+          forceFetch: Boolean(body.forceFetch),
+          disableFixtureFallback: Boolean(body.disableFixtureFallback),
+          codeforcesBaseUrl: body.codeforcesBaseUrl || undefined,
+          uploadedProblemsHtml: body.uploadedProblemsHtml || null,
+          uploadedSourceUrl: body.uploadedSourceUrl || '',
+          interruptAfterProblemIndex: body.interruptAfterProblemIndex || null,
+          strictNetworkOnly: Boolean(body.strictNetworkOnly),
+          skipTranslation: Boolean(body.skipTranslation),
+          skipTestPrep: Boolean(body.skipTestPrep),
+          skipEditorial: Boolean(body.skipEditorial)
+        };
 
         if (!awaitCompletion) {
-          importContest(contestId, {
-            provider: body.provider,
-            useFixture: Boolean(body.useFixture),
-            forceRegenerate: Boolean(body.forceRegenerate),
-            uploadedProblemsHtml: body.uploadedProblemsHtml || null,
-            interruptAfterProblemIndex: body.interruptAfterProblemIndex || null
-          }).catch(() => {});
+          importContest(contestId, importOpts).catch(() => {});
           sendJson(res, 202, { ok: true, started: true, contestId });
           return;
         }
 
-        const result = await importContest(contestId, {
-          provider: body.provider,
-          useFixture: Boolean(body.useFixture),
-          forceRegenerate: Boolean(body.forceRegenerate),
-          uploadedProblemsHtml: body.uploadedProblemsHtml || null,
-          interruptAfterProblemIndex: body.interruptAfterProblemIndex || null,
-          strictNetworkOnly: Boolean(body.strictNetworkOnly)
-        });
+        const result = await importContest(contestId, importOpts);
         sendJson(res, 200, result);
         return;
       }

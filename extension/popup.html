@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Offline CFOJ Contest Importer</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 14px;
+      width: 340px;
+      background: #0b1120;
+      color: #f1f5f9;
+      font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #283548;
+    }
+    .badge {
+      background: #0284c7;
+      color: #fff;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 5px;
+      font-size: 11px;
+    }
+    .status-box {
+      background: #111827;
+      border: 1px solid #283548;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 12px;
+      color: #cbd5e1;
+    }
+    .btn {
+      width: 100%;
+      padding: 9px 12px;
+      border-radius: 7px;
+      border: 1px solid #38bdf8;
+      background: #0284c7;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn:hover:not(:disabled) {
+      background: #0369a1;
+    }
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .field {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    input {
+      background: #0f172a;
+      color: #f1f5f9;
+      border: 1px solid #283548;
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .msg-ok {
+      color: #86efac;
+      margin-top: 8px;
+      font-weight: 600;
+    }
+    .msg-err {
+      color: #fda4af;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <strong>Offline CFOJ Importer</strong>
+    <span class="badge">Loopback 127.0.0.1</span>
+  </div>
+
+  <div id="page-status" class="status-box">
+    Checking active Codeforces tab... / 正在检测当前 Codeforces 标签页...
+  </div>
+
+  <button type="button" id="send-contest-btn" class="btn" disabled>
+    Send this contest to CFOJ / 发送本场比赛至 CFOJ
+  </button>
+
+  <div id="result-msg"></div>
+
+  <div class="field">
+    <span>Local CFOJ Receiver Origin (Loopback only):</span>
+    <input type="text" id="cfoj-origin-input" value="http://127.0.0.1:4321" />
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Offline CFOJ Contest Importer",
+  "version": "1.0.0",
+  "description": "One-click transfer of displayed Codeforces contest statements to your local Offline CFOJ judge on 127.0.0.1.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://codeforces.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_title": "Send this contest to CFOJ",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://codeforces.com/contest/*",
+        "https://codeforces.com/gym/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

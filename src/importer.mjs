@@ -12,15 +12,19 @@ import { TRANSLATION_SCHEMA, runProviderStructuredJob } from './providers.mjs';
 import {
   compareProblemIndices,
   extractProtectedFragments,
+  hasCfMitigatedChallengeHeader,
   isCloudflareChallengeHtml,
+  isCloudflareChallengeResponse,
   localizeHtmlAssets,
   parseContestProblemsHtml,
+  validateParsedContestProblems,
   validateTranslatedStatement
 } from './statement.mjs';
 import { prepareProblemTestPackage } from './testgen.mjs';
 
 let lastRemoteFetchAt = 0;
 const MIN_REMOTE_INTERVAL_MS = 1200;
+const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 export function parseContestIdInput(input) {
   const s = String(input ?? '').trim();
@@ -30,61 +34,173 @@ export function parseContestIdInput(input) {
   throw new Error(`Invalid contest ID '${s}'. Enter a numeric Codeforces contest ID (e.g. 4).`);
 }
 
+function getCodeforcesBaseUrl(options = {}) {
+  const base =
+    options.codeforcesBaseUrl ||
+    process.env.CFOJ_CF_BASE_URL ||
+    getSetting('codeforces_base_url', '') ||
+    'https://codeforces.com';
+  return String(base).replace(/\/+$/, '');
+}
+
 async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function rateLimitedFetch(url, retries = 3) {
+function createFetchError({ code, category, message, messageZh, httpStatus = null, cfMitigated = null, extra = {} }) {
+  const err = new Error(message);
+  err.code = code;
+  err.category = category;
+  err.messageZh = messageZh || message;
+  err.httpStatus = httpStatus;
+  err.cfMitigated = cfMitigated;
+  Object.assign(err, extra);
+  return err;
+}
+
+async function rateLimitedFetch(url, retries = 3, options = {}) {
   if (getSetting('offline_mode', 'false') === 'true') {
-    const err = new Error(`Offline mode is active; network request blocked for ${url}`);
-    err.code = 'OFFLINE_MODE';
-    throw err;
+    throw createFetchError({
+      code: 'OFFLINE_MODE',
+      category: 'network_failure',
+      message: `Offline mode is active; network request blocked for ${url}`,
+      messageZh: `当前处于严格离线模式，已阻止对 ${url} 的网络请求`
+    });
   }
 
+  const minInterval = options.minIntervalMs ?? MIN_REMOTE_INTERVAL_MS;
   let attempt = 0;
-  let delayMs = 400;
+  let delayMs = options.initialBackoffMs ?? 350;
+
   while (true) {
     const elapsed = Date.now() - lastRemoteFetchAt;
-    if (elapsed < MIN_REMOTE_INTERVAL_MS) {
-      await sleep(MIN_REMOTE_INTERVAL_MS - elapsed);
+    if (elapsed < minInterval) {
+      await sleep(minInterval - elapsed);
     }
     lastRemoteFetchAt = Date.now();
     attempt++;
 
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
+      const timer = setTimeout(() => controller.abort(), options.timeoutMs || 8000);
       const res = await fetch(url, {
         headers: {
           'User-Agent': 'OfflineCFOJ/1.0 (Local Windows Practice Judge)',
-          Accept: 'text/html,application/json,*/*'
+          Accept: 'text/html,application/json,*/*',
+          'Accept-Language': 'en-US,en;q=0.9'
         },
         signal: controller.signal
       });
       clearTimeout(timer);
 
-      if (res.status === 429 || res.status >= 500) {
+      const cfMitigated = res.headers?.get?.('cf-mitigated') || null;
+      const isChallengeHeader = hasCfMitigatedChallengeHeader(res.headers);
+
+      // Do not retry a browser challenge; return immediately so caller can transition to browser verification
+      if (!isChallengeHeader && (res.status === 429 || res.status >= 500)) {
         if (attempt <= retries) {
           await sleep(delayMs);
           delayMs *= 2;
           continue;
         }
       }
+
       const buf = Buffer.from(await res.arrayBuffer());
-      return { status: res.status, ok: res.ok, buffer: buf, text: () => buf.toString('utf8') };
+      return {
+        status: res.status,
+        ok: res.ok,
+        headers: res.headers,
+        cfMitigated,
+        isChallengeHeader,
+        buffer: buf,
+        text: () => buf.toString('utf8')
+      };
     } catch (err) {
       if (attempt <= retries) {
         await sleep(delayMs);
         delayMs *= 2;
         continue;
       }
-      throw err;
+      throw createFetchError({
+        code: 'NETWORK_FAILURE',
+        category: 'network_failure',
+        message: `Network failure while fetching ${url}: ${err.message}`,
+        messageZh: `网络请求失败 (${url})：${err.message}`
+      });
     }
   }
 }
 
 function getFixtureDir(contestId) {
   return path.join(ROOT_DIR, 'fixtures', 'codeforces', `contest${contestId}`);
+}
+
+export function issueBrowserTransferToken(
+  contestId,
+  expectedIndices = [],
+  provider = null,
+  ttlMs = DEFAULT_TOKEN_TTL_MS
+) {
+  const db = getDb();
+  const now = getNowMs();
+  const token = crypto.randomBytes(24).toString('hex');
+  const expiresAt = now + Math.max(5000, Number(ttlMs) || DEFAULT_TOKEN_TTL_MS);
+  const prov = provider || getSetting('ai_provider', 'codex');
+
+  db.prepare(
+    `INSERT INTO browser_transfer_tokens (
+      token, contest_id, expected_indices_json, provider, created_at, expires_at, used_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL)`
+  ).run(token, Number(contestId), JSON.stringify(expectedIndices), prov, now, expiresAt);
+
+  return {
+    token,
+    contestId: Number(contestId),
+    expectedIndices,
+    provider: prov,
+    createdAt: now,
+    expiresAt,
+    targetUrl: `https://codeforces.com/contest/${contestId}/problems?locale=en`
+  };
+}
+
+export function getActiveBrowserTransferToken(contestId) {
+  const db = getDb();
+  const now = getNowMs();
+  const row = db
+    .prepare(
+      `SELECT *
+       FROM browser_transfer_tokens
+       WHERE contest_id = ?
+         AND used_at IS NULL
+         AND expires_at > ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .get(Number(contestId), now);
+
+  if (!row) return null;
+  return {
+    token: row.token,
+    contestId: row.contest_id,
+    expectedIndices: JSON.parse(row.expected_indices_json || '[]'),
+    provider: row.provider,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    targetUrl: `https://codeforces.com/contest/${row.contest_id}/problems?locale=en`
+  };
+}
+
+export function ensureBrowserTransferTokenForPendingContest(contestId) {
+  const existing = getActiveBrowserTransferToken(contestId);
+  if (existing) return existing;
+
+  const db = getDb();
+  const probs = db
+    .prepare('SELECT problem_index FROM problems WHERE contest_id = ? ORDER BY sort_order ASC')
+    .all(Number(contestId));
+  const expectedIndices = probs.map((p) => p.problem_index.toUpperCase());
+  return issueBrowserTransferToken(contestId, expectedIndices);
 }
 
 async function fetchContestApiStandings(contestId, cacheDir, options = {}) {
@@ -94,81 +210,265 @@ async function fetchContestApiStandings(contestId, cacheDir, options = {}) {
   }
 
   const fixtureFile = path.join(getFixtureDir(contestId), 'contest.standings.json');
-  const preferFixture = options.useFixture || getSetting('offline_mode', 'false') === 'true';
+  const preferFixture = Boolean(options.useFixture);
 
-  if (!preferFixture) {
-    try {
-      const apiUrl = `https://codeforces.com/api/contest.standings?contestId=${contestId}`;
-      const res = await rateLimitedFetch(apiUrl, 2);
-      if (res.ok) {
-        const parsed = JSON.parse(res.text());
-        if (parsed.status === 'OK' && parsed.result) {
-          fs.writeFileSync(cacheFile, JSON.stringify(parsed, null, 2), 'utf8');
-          return parsed;
-        }
-      }
-    } catch (err) {
-      if (options.strictNetworkOnly || !fs.existsSync(fixtureFile)) {
-        throw new Error(`Failed to fetch Codeforces API for contest ${contestId}: ${err.message}`);
-      }
-    }
-  }
-
-  if (!options.strictNetworkOnly && fs.existsSync(fixtureFile)) {
+  if (preferFixture && fs.existsSync(fixtureFile)) {
     const raw = fs.readFileSync(fixtureFile, 'utf8');
     fs.writeFileSync(cacheFile, raw, 'utf8');
     return JSON.parse(raw);
   }
 
-  throw new Error(`Contest ${contestId} metadata unavailable from Codeforces API and no local cache/fixture exists.`);
+  const baseUrl = getCodeforcesBaseUrl(options);
+  try {
+    const apiUrl = `${baseUrl}/api/contest.standings?contestId=${contestId}`;
+    const res = await rateLimitedFetch(apiUrl, 2, options);
+    const bodyText = res.text();
+
+    if (isCloudflareChallengeResponse(bodyText, res.headers)) {
+      throw createFetchError({
+        code: 'CLOUDFLARE_CHALLENGE',
+        category: 'browser_challenge',
+        httpStatus: res.status,
+        cfMitigated: res.cfMitigated || 'challenge',
+        message: `Codeforces API returned a Cloudflare challenge (HTTP ${res.status}) for contest ${contestId}.`,
+        messageZh: `Codeforces API 返回了 Cloudflare 验证挑战 (HTTP ${res.status})。`
+      });
+    }
+
+    if (res.status === 429) {
+      throw createFetchError({
+        code: 'RATE_LIMITED',
+        category: 'rate_limited',
+        httpStatus: 429,
+        message: `Rate limited by Codeforces API (HTTP 429) while fetching contest ${contestId}.`,
+        messageZh: `请求比赛 #${contestId} 元数据时被 Codeforces API 限流 (HTTP 429)。`
+      });
+    }
+
+    if (res.status === 401 || res.status === 403 || res.status === 404) {
+      throw createFetchError({
+        code: 'ACCESS_DENIED',
+        category: 'access_denied',
+        httpStatus: res.status,
+        message: `Access denied by Codeforces API (HTTP ${res.status}) for contest ${contestId}.`,
+        messageZh: `Codeforces API 拒绝访问比赛 #${contestId} (HTTP ${res.status})。`
+      });
+    }
+
+    if (res.ok) {
+      let parsed;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch (e) {
+        throw createFetchError({
+          code: 'PARSE_ERROR',
+          category: 'parse_error',
+          message: `Invalid JSON from Codeforces API for contest ${contestId}: ${e.message}`,
+          messageZh: `Codeforces API 返回的比赛 #${contestId} 元数据 JSON 无法解析。`
+        });
+      }
+      if (parsed.status === 'OK' && parsed.result) {
+        fs.writeFileSync(cacheFile, JSON.stringify(parsed, null, 2), 'utf8');
+        return parsed;
+      }
+      const comment = String(parsed.comment || 'API status FAILED');
+      if (/limit exceeded/i.test(comment)) {
+        throw createFetchError({
+          code: 'RATE_LIMITED',
+          category: 'rate_limited',
+          httpStatus: 429,
+          message: `Codeforces API rate limit exceeded: ${comment}`,
+          messageZh: `Codeforces API 调用频率超限：${comment}`
+        });
+      }
+      throw createFetchError({
+        code: 'ACCESS_DENIED',
+        category: 'access_denied',
+        httpStatus: 400,
+        message: `Codeforces API rejected contest ${contestId}: ${comment}`,
+        messageZh: `Codeforces API 拒绝了比赛 #${contestId} 请求：${comment}`
+      });
+    }
+
+    throw createFetchError({
+      code: 'NETWORK_FAILURE',
+      category: 'network_failure',
+      httpStatus: res.status,
+      message: `Codeforces API returned HTTP ${res.status} for contest ${contestId}.`,
+      messageZh: `Codeforces API 返回异常状态码 HTTP ${res.status}。`
+    });
+  } catch (err) {
+    // Allow offline sandboxed fixture fallback ONLY when network is unreachable in sandbox for a bundled fixture contest
+    if (
+      !options.strictNetworkOnly &&
+      !options.disableFixtureFallback &&
+      err.category === 'network_failure' &&
+      fs.existsSync(fixtureFile) &&
+      getSetting('allow_fixture_fallback', 'true') === 'true'
+    ) {
+      const raw = fs.readFileSync(fixtureFile, 'utf8');
+      fs.writeFileSync(cacheFile, raw, 'utf8');
+      return JSON.parse(raw);
+    }
+    throw err;
+  }
 }
 
-async function fetchContestProblemsPage(contestId, cacheDir, options = {}) {
+async function fetchAndValidateContestProblems(
+  contestId,
+  expectedIndices,
+  cacheDir,
+  options = {}
+) {
   const cacheFile = path.join(cacheDir, 'problems.html');
-  if (options.uploadedProblemsHtml) {
-    fs.writeFileSync(cacheFile, options.uploadedProblemsHtml, 'utf8');
-    return options.uploadedProblemsHtml;
-  }
-  if (fs.existsSync(cacheFile) && !options.forceFetch) {
-    const cached = fs.readFileSync(cacheFile, 'utf8');
-    if (!isCloudflareChallengeHtml(cached)) return cached;
-  }
 
-  const fixtureFile = path.join(getFixtureDir(contestId), 'problems.html');
-  const preferFixture = options.useFixture || getSetting('offline_mode', 'false') === 'true';
-
-  if (!preferFixture) {
+  const validateAndParse = (html, sourceUrl = '', writeToCache = false) => {
+    let parsedHtml;
     try {
-      const url = `https://codeforces.com/contest/${contestId}/problems`;
-      const res = await rateLimitedFetch(url, 2);
-      const html = res.text();
-      if (res.ok && !isCloudflareChallengeHtml(html)) {
-        fs.writeFileSync(cacheFile, html, 'utf8');
-        return html;
+      parsedHtml = parseContestProblemsHtml(html);
+    } catch (parseErr) {
+      if (parseErr.code === 'CLOUDFLARE_CHALLENGE') {
+        throw createFetchError({
+          code: 'CLOUDFLARE_CHALLENGE',
+          category: 'browser_challenge',
+          cfMitigated: 'challenge',
+          message: `Human verification required in browser for contest #${contestId} (Cloudflare challenge page detected).`,
+          messageZh: `比赛 #${contestId} 需要在浏览器中完成人工验证（检测到 Cloudflare 验证挑战页面）。`
+        });
       }
-      if (isCloudflareChallengeHtml(html) && options.strictNetworkOnly) {
-        const err = new Error(
-          `Codeforces returned an anti-bot challenge (HTTP ${res.status}) for /contest/${contestId}/problems. Upload a browser-saved HTML page or use local fixture.`
-        );
-        err.code = 'CLOUDFLARE_CHALLENGE';
-        throw err;
-      }
-    } catch (err) {
-      if (options.strictNetworkOnly || !fs.existsSync(fixtureFile)) {
-        throw err;
-      }
+      throw createFetchError({
+        code: 'PARSE_ERROR',
+        category: 'parse_error',
+        message: `Failed to parse contest #${contestId} statements HTML: ${parseErr.message}`,
+        messageZh: `解析比赛 #${contestId} 题面 HTML 失败：${parseErr.message}`
+      });
+    }
+
+    const val = validateParsedContestProblems({
+      html,
+      parsedHtml,
+      expectedContestId: contestId,
+      expectedIndices,
+      sourceUrl
+    });
+    if (!val.ok) {
+      throw createFetchError({
+        code: val.code,
+        category: 'parse_error',
+        message: val.error,
+        messageZh: val.errorZh,
+        extra: {
+          missingIndices: val.missingIndices,
+          foundIndices: val.foundIndices,
+          detectedContestId: val.detectedContestId
+        }
+      });
+    }
+
+    if (writeToCache) {
+      fs.writeFileSync(cacheFile, html, 'utf8');
+    }
+    return { html, parsedHtml };
+  };
+
+  // 1. Uploaded HTML (from manual file upload fallback or browser extension transfer)
+  if (options.uploadedProblemsHtml) {
+    const res = validateAndParse(
+      options.uploadedProblemsHtml,
+      options.uploadedSourceUrl || '',
+      true
+    );
+    return { ...res, source: 'uploaded' };
+  }
+
+  // 2. Cached problems.html on disk (offline reuse of cached statements)
+  if (fs.existsSync(cacheFile) && !options.forceFetch) {
+    const cachedHtml = fs.readFileSync(cacheFile, 'utf8');
+    if (!isCloudflareChallengeHtml(cachedHtml)) {
+      const res = validateAndParse(cachedHtml, '', false);
+      return { ...res, source: 'cache' };
     }
   }
 
-  if (!options.strictNetworkOnly && fs.existsSync(fixtureFile)) {
-    const html = fs.readFileSync(fixtureFile, 'utf8');
-    fs.writeFileSync(cacheFile, html, 'utf8');
-    return html;
+  // 3. Explicit fixture mode
+  const fixtureFile = path.join(getFixtureDir(contestId), 'problems.html');
+  if (options.useFixture && fs.existsSync(fixtureFile)) {
+    const fixtureHtml = fs.readFileSync(fixtureFile, 'utf8');
+    const res = validateAndParse(fixtureHtml, '', true);
+    return { ...res, source: 'fixture' };
   }
 
-  throw new Error(
-    `Could not fetch problem statements for contest ${contestId}. Save https://codeforces.com/contest/${contestId}/problems from your browser and import the HTML file, or retry when online.`
-  );
+  // 4. Default: Direct HTTP fetch of the official English problems page
+  const baseUrl = getCodeforcesBaseUrl(options);
+  const url = `${baseUrl}/contest/${contestId}/problems?locale=en`;
+
+  try {
+    const res = await rateLimitedFetch(url, 2, options);
+    const html = res.text();
+
+    // Check cf-mitigated: challenge header OR Cloudflare challenge body first
+    if (isCloudflareChallengeResponse(html, res.headers)) {
+      throw createFetchError({
+        code: 'CLOUDFLARE_CHALLENGE',
+        category: 'browser_challenge',
+        httpStatus: res.status,
+        cfMitigated: res.cfMitigated || 'challenge',
+        message: `Human verification required in browser: Codeforces returned a challenge (HTTP ${res.status}${res.cfMitigated ? `, cf-mitigated: ${res.cfMitigated}` : ''}) for /contest/${contestId}/problems?locale=en.`,
+        messageZh: `需要浏览器人工验证：Codeforces 对 /contest/${contestId}/problems?locale=en 返回了验证挑战 (HTTP ${res.status}${res.cfMitigated ? `, cf-mitigated: ${res.cfMitigated}` : ''})。`
+      });
+    }
+
+    // Distinguish rate limiting (HTTP 429)
+    if (res.status === 429) {
+      throw createFetchError({
+        code: 'RATE_LIMITED',
+        category: 'rate_limited',
+        httpStatus: 429,
+        message: `Rate limited by Codeforces (HTTP 429 Too Many Requests) while fetching /contest/${contestId}/problems?locale=en.`,
+        messageZh: `抓取题面页 /contest/${contestId}/problems?locale=en 时被服务器限流 (HTTP 429 Too Many Requests)，请稍后重试。`
+      });
+    }
+
+    // Distinguish ordinary access denial (HTTP 401 / 403 / 404 without challenge)
+    if (res.status === 401 || res.status === 403 || res.status === 404) {
+      throw createFetchError({
+        code: 'ACCESS_DENIED',
+        category: 'access_denied',
+        httpStatus: res.status,
+        message: `Access denied (HTTP ${res.status}) for /contest/${contestId}/problems?locale=en (no browser challenge header). The contest may be private or not publicly available.`,
+        messageZh: `访问被拒绝 (HTTP ${res.status}，非浏览器验证挑战)：无法访问 /contest/${contestId}/problems?locale=en。`
+      });
+    }
+
+    // Distinguish upstream server / network failure (HTTP 5xx)
+    if (!res.ok) {
+      throw createFetchError({
+        code: 'NETWORK_FAILURE',
+        category: 'network_failure',
+        httpStatus: res.status,
+        message: `Server error (HTTP ${res.status}) while fetching /contest/${contestId}/problems?locale=en.`,
+        messageZh: `抓取 /contest/${contestId}/problems?locale=en 时服务器返回错误 (HTTP ${res.status})。`
+      });
+    }
+
+    // Validate contest ID & expected problem indices before writing to cache
+    const validated = validateAndParse(html, url, true);
+    return { ...validated, source: 'direct_http' };
+  } catch (err) {
+    // Allow offline sandboxed fixture fallback ONLY when network is completely unreachable in sandbox for a bundled fixture contest
+    if (
+      !options.strictNetworkOnly &&
+      !options.disableFixtureFallback &&
+      err.category === 'network_failure' &&
+      fs.existsSync(fixtureFile) &&
+      getSetting('allow_fixture_fallback', 'true') === 'true'
+    ) {
+      const fixtureHtml = fs.readFileSync(fixtureFile, 'utf8');
+      const validated = validateAndParse(fixtureHtml, '', true);
+      return { ...validated, source: 'fixture' };
+    }
+    throw err;
+  }
 }
 
 async function fetchContestTutorialPage(contestId, tutorialUrl, cacheDir, options = {}) {
@@ -183,9 +483,9 @@ async function fetchContestTutorialPage(contestId, tutorialUrl, cacheDir, option
 
   if (!preferFixture && tutorialUrl) {
     try {
-      const res = await rateLimitedFetch(tutorialUrl, 2);
+      const res = await rateLimitedFetch(tutorialUrl, 2, options);
       const html = res.text();
-      if (res.ok && !isCloudflareChallengeHtml(html)) {
+      if (res.ok && !isCloudflareChallengeResponse(html, res.headers)) {
         fs.writeFileSync(cacheFile, html, 'utf8');
         return html;
       }
@@ -206,6 +506,7 @@ async function fetchContestTutorialPage(contestId, tutorialUrl, cacheDir, option
 function createAssetResolver(contestId, assetsDir, options = {}) {
   fs.mkdirSync(assetsDir, { recursive: true });
   const fixtureAssetsDir = path.join(getFixtureDir(contestId), 'assets');
+  const baseUrl = getCodeforcesBaseUrl(options);
 
   return async function resolveAsset(rawUrl) {
     const parsedPath = rawUrl.split('?')[0];
@@ -227,9 +528,9 @@ function createAssetResolver(contestId, assetsDir, options = {}) {
       try {
         const fullUrl = rawUrl.startsWith('http')
           ? rawUrl
-          : `https://codeforces.com${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
-        const res = await rateLimitedFetch(fullUrl, 2);
-        if (res.ok && res.buffer.length > 0) {
+          : `${baseUrl}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+        const res = await rateLimitedFetch(fullUrl, 2, options);
+        if (res.ok && res.buffer.length > 0 && !isCloudflareChallengeResponse('', res.headers)) {
           fs.writeFileSync(targetPath, res.buffer);
           return { localFilename: baseName, localPath: targetPath, cached: false };
         }
@@ -386,6 +687,11 @@ export async function importContest(contestIdInput, options = {}) {
   const steps = {
     contestId,
     provider: providerName,
+    errorCategory: null,
+    errorCode: null,
+    errorMessage: null,
+    errorMessageZh: null,
+    browserVerification: null,
     problems: {}
   };
 
@@ -396,28 +702,11 @@ export async function importContest(contestIdInput, options = {}) {
     const cfProblems = [...(apiData.result.problems || [])];
     const cfRows = (apiData.result.rows || []).slice(0, 150);
 
-    // 2. Fetch contest problems HTML page
-    let parsedHtml = { problems: [], tutorialUrl: null };
-    let htmlFetchError = null;
-    try {
-      const problemsHtml = await fetchContestProblemsPage(contestId, cacheDir, options);
-      parsedHtml = parseContestProblemsHtml(problemsHtml);
-    } catch (err) {
-      htmlFetchError = err.message;
-    }
+    const expectedIndices = cfProblems
+      .map((p) => String(p.index).toUpperCase())
+      .sort(compareProblemIndices);
 
-    const htmlByIndex = {};
-    for (const hp of parsedHtml.problems) {
-      htmlByIndex[hp.problemIndex.toUpperCase()] = hp;
-    }
-
-    // Discover union of problems in contest order (including A1, A2, etc.)
-    const allIndicesSet = new Set([
-      ...cfProblems.map((p) => String(p.index).toUpperCase()),
-      ...Object.keys(htmlByIndex)
-    ]);
-    const orderedIndices = [...allIndicesSet].sort(compareProblemIndices);
-
+    // Persist contest metadata immediately so pending import is always preserved
     const existingContest = db.prepare('SELECT * FROM contests WHERE id = ?').get(contestId);
     const titleZhDefault =
       contestId === 4
@@ -439,7 +728,7 @@ export async function importContest(contestIdInput, options = {}) {
         cfContest.durationSeconds || 7200,
         cfContest.startTimeSeconds || null,
         `https://codeforces.com/contest/${contestId}`,
-        parsedHtml.tutorialUrl || `https://codeforces.com/blog/entry/169`,
+        null,
         contestDir,
         JSON.stringify(cfRows),
         now,
@@ -453,7 +742,6 @@ export async function importContest(contestIdInput, options = {}) {
              phase = ?,
              duration_seconds = ?,
              start_time_seconds = COALESCE(?, start_time_seconds),
-             tutorial_url = COALESCE(?, tutorial_url),
              standings_json = ?,
              updated_at = ?
          WHERE id = ?`
@@ -463,39 +751,168 @@ export async function importContest(contestIdInput, options = {}) {
         cfContest.phase || existingContest.phase,
         cfContest.durationSeconds || existingContest.duration_seconds,
         cfContest.startTimeSeconds || null,
-        parsedHtml.tutorialUrl || existingContest.tutorial_url,
         JSON.stringify(cfRows),
         getNowMs(),
         contestId
       );
     }
 
-    // Initialize per-problem progress display
-    for (let i = 0; i < orderedIndices.length; i++) {
-      const idx = orderedIndices[i];
-      const existingProb = db
-        .prepare('SELECT * FROM problems WHERE id = ?')
-        .get(`${contestId}${idx}`);
+    // Ensure problem rows from API metadata exist in SQLite before statement fetch
+    for (let i = 0; i < expectedIndices.length; i++) {
+      const idx = expectedIndices[i];
+      const probId = `${contestId}${idx}`;
+      const apiMeta = cfProblems.find((p) => String(p.index).toUpperCase() === idx) || {};
+      const existingProb = db.prepare('SELECT * FROM problems WHERE id = ?').get(probId);
+      if (!existingProb) {
+        db.prepare(
+          `INSERT INTO problems (
+            id, contest_id, problem_index, sort_order, title_en, problem_type,
+            points, rating, tags_json, source_url, fetch_status, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'batch', ?, ?, ?, ?, 'pending', ?)`
+        ).run(
+          probId,
+          contestId,
+          idx,
+          i,
+          apiMeta.name || `Problem ${idx}`,
+          apiMeta.points || null,
+          apiMeta.rating || null,
+          JSON.stringify(apiMeta.tags || []),
+          `https://codeforces.com/contest/${contestId}/problem/${idx}`,
+          getNowMs()
+        );
+      }
       steps.problems[idx] = {
         index: idx,
-        fetching: existingProb?.fetch_status === 'ready' && !options.forceRegenerate ? 'ready' : 'pending',
+        fetching:
+          existingProb?.fetch_status === 'ready' && !options.forceRegenerate ? 'ready' : 'pending',
         translation:
-          existingProb?.translation_status === 'ready' && !options.forceRegenerate ? 'ready' : 'pending',
+          existingProb?.translation_status === 'ready' && !options.forceRegenerate
+            ? 'ready'
+            : 'pending',
         test_prep:
-          existingProb?.test_prep_status === 'ready' && existingProb?.active_package_rev > 0 && !options.forceRegenerate
+          existingProb?.test_prep_status === 'ready' &&
+          existingProb?.active_package_rev > 0 &&
+          !options.forceRegenerate
             ? 'ready'
             : 'pending',
         editorial_prep:
-          existingProb?.editorial_prep_status === 'ready' && existingProb?.editorial_verified === 1 && !options.forceRegenerate
+          existingProb?.editorial_prep_status === 'ready' &&
+          existingProb?.editorial_verified === 1 &&
+          !options.forceRegenerate
             ? 'ready'
             : 'pending'
       };
     }
     emitImportProgress(jobId, contestId, 'running', steps);
 
+    // 2. Fetch and validate contest problems HTML page
+    let parsedHtml = { problems: [], tutorialUrl: null };
+    let statementFetchSource = null;
+
+    // Check if all expected problems already have cached statements in SQLite and no forceFetch/upload
+    const existingProbsAll = db
+      .prepare('SELECT * FROM problems WHERE contest_id = ? ORDER BY sort_order ASC')
+      .all(contestId);
+    const allStatementsAlreadyCached =
+      !options.forceFetch &&
+      !options.uploadedProblemsHtml &&
+      existingProbsAll.length > 0 &&
+      existingProbsAll.every((p) => p.fetch_status === 'ready' && Boolean(p.statement_en_json)) &&
+      !fs.existsSync(path.join(cacheDir, 'problems.html'));
+
+    if (!allStatementsAlreadyCached) {
+      try {
+        const fetched = await fetchAndValidateContestProblems(
+          contestId,
+          expectedIndices,
+          cacheDir,
+          options
+        );
+        parsedHtml = fetched.parsedHtml;
+        statementFetchSource = fetched.source;
+      } catch (fetchErr) {
+        steps.errorCategory = fetchErr.category || 'network_failure';
+        steps.errorCode = fetchErr.code || 'FETCH_ERROR';
+        steps.errorMessage = fetchErr.message;
+        steps.errorMessageZh = fetchErr.messageZh || fetchErr.message;
+
+        const isBrowserChallenge = fetchErr.category === 'browser_challenge';
+        let browserTokenInfo = null;
+        if (isBrowserChallenge) {
+          browserTokenInfo = issueBrowserTransferToken(
+            contestId,
+            expectedIndices,
+            providerName,
+            options.tokenTtlMs || DEFAULT_TOKEN_TTL_MS
+          );
+          steps.browserVerification = {
+            required: true,
+            contestId,
+            expectedIndices,
+            targetUrl: browserTokenInfo.targetUrl,
+            token: browserTokenInfo.token,
+            expiresAt: browserTokenInfo.expiresAt
+          };
+        }
+
+        // Preserve any problem that already had a cached statement, mark others awaiting_browser or failed
+        for (const idx of expectedIndices) {
+          const probId = `${contestId}${idx}`;
+          const existingProb = db.prepare('SELECT * FROM problems WHERE id = ?').get(probId);
+          if (existingProb?.statement_en_json && !options.forceFetch) {
+            steps.problems[idx].fetching = 'ready';
+          } else {
+            const newFetchStatus = isBrowserChallenge ? 'awaiting_browser' : 'failed';
+            db.prepare(
+              'UPDATE problems SET fetch_status = ?, fetch_error = ?, updated_at = ? WHERE id = ?'
+            ).run(newFetchStatus, fetchErr.message, getNowMs(), probId);
+            steps.problems[idx].fetching = newFetchStatus;
+            steps.problems[idx].fetchError = fetchErr.message;
+            steps.problems[idx].fetchErrorCategory = steps.errorCategory;
+          }
+        }
+
+        const jobStatus = isBrowserChallenge ? 'awaiting_browser' : 'failed';
+        emitImportProgress(jobId, contestId, jobStatus, steps, fetchErr.message);
+
+        return {
+          ok: false,
+          jobId,
+          contestId,
+          status: jobStatus,
+          errorCategory: steps.errorCategory,
+          errorCode: steps.errorCode,
+          error: fetchErr.message,
+          errorZh: steps.errorMessageZh,
+          browserVerification: steps.browserVerification,
+          steps,
+          summary: getContestReadinessSummary(contestId)
+        };
+      }
+    }
+
+    if (parsedHtml.tutorialUrl) {
+      db.prepare('UPDATE contests SET tutorial_url = ?, updated_at = ? WHERE id = ?').run(
+        parsedHtml.tutorialUrl,
+        getNowMs(),
+        contestId
+      );
+    }
+
+    const htmlByIndex = {};
+    for (const hp of parsedHtml.problems) {
+      htmlByIndex[hp.problemIndex.toUpperCase()] = hp;
+    }
+
+    const allIndicesSet = new Set([
+      ...expectedIndices,
+      ...Object.keys(htmlByIndex)
+    ]);
+    const orderedIndices = [...allIndicesSet].sort(compareProblemIndices);
     const assetResolver = createAssetResolver(contestId, assetsDir, options);
 
-    // 3. Process fetching & statement preservation per problem
+    // 3. Save and localize English statements FIRST (so downloads stay available even if an AI step fails)
     for (let i = 0; i < orderedIndices.length; i++) {
       const idx = orderedIndices[i];
       const probId = `${contestId}${idx}`;
@@ -503,8 +920,23 @@ export async function importContest(contestIdInput, options = {}) {
       const domStmt = htmlByIndex[idx] || null;
       const existingProb = db.prepare('SELECT * FROM problems WHERE id = ?').get(probId);
 
-      // If already fetched and cached, preserve unless forceRegenerate
-      if (existingProb && existingProb.fetch_status === 'ready' && existingProb.statement_en_json && !options.forceRegenerate && !domStmt) {
+      if (!steps.problems[idx]) {
+        steps.problems[idx] = {
+          index: idx,
+          fetching: 'pending',
+          translation: 'pending',
+          test_prep: 'pending',
+          editorial_prep: 'pending'
+        };
+      }
+
+      if (
+        existingProb &&
+        existingProb.fetch_status === 'ready' &&
+        existingProb.statement_en_json &&
+        !options.forceRegenerate &&
+        !domStmt
+      ) {
         steps.problems[idx].fetching = 'ready';
         emitImportProgress(jobId, contestId, 'running', steps);
         continue;
@@ -514,32 +946,11 @@ export async function importContest(contestIdInput, options = {}) {
       emitImportProgress(jobId, contestId, 'running', steps);
 
       if (!domStmt) {
-        const fetchErr = htmlFetchError || `Statement for problem ${idx} not found in contest page`;
-        if (!existingProb) {
-          db.prepare(
-            `INSERT INTO problems (
-              id, contest_id, problem_index, sort_order, title_en, problem_type,
-              points, rating, tags_json, source_url, fetch_status, fetch_error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'batch', ?, ?, ?, ?, 'failed', ?, ?)`
-          ).run(
-            probId,
-            contestId,
-            idx,
-            i,
-            apiMeta.name || `Problem ${idx}`,
-            apiMeta.points || null,
-            apiMeta.rating || null,
-            JSON.stringify(apiMeta.tags || []),
-            `https://codeforces.com/contest/${contestId}/problem/${idx}`,
-            fetchErr,
-            getNowMs()
-          );
-        } else {
-          db.prepare(
-            "UPDATE problems SET sort_order = ?, fetch_status = CASE WHEN statement_en_json IS NOT NULL THEN 'ready' ELSE 'failed' END, fetch_error = ?, updated_at = ? WHERE id = ?"
-          ).run(i, fetchErr, getNowMs(), probId);
-        }
-        steps.problems[idx].fetching = existingProb?.statement_en_json ? 'ready' : 'failed';
+        const fetchErr = `Statement for problem ${idx} not found in contest page`;
+        db.prepare(
+          "UPDATE problems SET sort_order = ?, fetch_status = 'failed', fetch_error = ?, updated_at = ? WHERE id = ?"
+        ).run(i, fetchErr, getNowMs(), probId);
+        steps.problems[idx].fetching = 'failed';
         steps.problems[idx].fetchError = fetchErr;
         emitImportProgress(jobId, contestId, 'running', steps);
         continue;
@@ -650,6 +1061,7 @@ export async function importContest(contestIdInput, options = {}) {
         }
 
         steps.problems[idx].fetching = 'ready';
+        steps.problems[idx].fetchError = null;
         emitImportProgress(jobId, contestId, 'running', steps);
       } catch (assetErr) {
         steps.problems[idx].fetching = 'failed';
@@ -679,7 +1091,10 @@ export async function importContest(contestIdInput, options = {}) {
     for (const prob of problemRows) {
       const idx = prob.problem_index;
 
-      if (options.onlyProblemIndex && options.onlyProblemIndex.toUpperCase() !== idx.toUpperCase()) {
+      if (
+        options.onlyProblemIndex &&
+        options.onlyProblemIndex.toUpperCase() !== idx.toUpperCase()
+      ) {
         continue;
       }
 
@@ -795,20 +1210,232 @@ export async function importContest(contestIdInput, options = {}) {
       jobId,
       contestId,
       status: finalStatus,
+      statementFetchSource,
       steps,
       summary: getContestReadinessSummary(contestId)
     };
   } catch (err) {
+    steps.errorCategory = err.category || 'network_failure';
+    steps.errorCode = err.code || 'IMPORT_ERROR';
+    steps.errorMessage = err.message;
+    steps.errorMessageZh = err.messageZh || err.message;
     emitImportProgress(jobId, contestId, 'failed', steps, err.message);
     return {
       ok: false,
       jobId,
       contestId,
       status: 'failed',
+      errorCategory: steps.errorCategory,
+      errorCode: steps.errorCode,
       error: err.message,
+      errorZh: steps.errorMessageZh,
       steps
     };
   }
+}
+
+export async function receiveBrowserContestTransfer({
+  token,
+  contestId = null,
+  pageUrl = '',
+  html = '',
+  assets = [],
+  awaitPreparation = true,
+  importOptions = {}
+}) {
+  const db = getDb();
+  const now = getNowMs();
+
+  if (!token || typeof token !== 'string') {
+    return {
+      ok: false,
+      status: 403,
+      code: 'INVALID_TOKEN',
+      category: 'access_denied',
+      error: 'Missing or invalid browser transfer token.',
+      errorZh: '缺少或无效的浏览器传输令牌。'
+    };
+  }
+
+  const tokenRow = db
+    .prepare('SELECT * FROM browser_transfer_tokens WHERE token = ?')
+    .get(token.trim());
+
+  if (!tokenRow) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'INVALID_TOKEN',
+      category: 'access_denied',
+      error: 'Unrecognized browser transfer token.',
+      errorZh: '无法识别的浏览器传输令牌。'
+    };
+  }
+
+  if (tokenRow.used_at !== null) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'TOKEN_ALREADY_USED',
+      category: 'access_denied',
+      error: 'This browser transfer token has already been used (single-use token).',
+      errorZh: '该浏览器传输令牌已被使用过（一次性令牌不可重复使用）。'
+    };
+  }
+
+  if (now > tokenRow.expires_at) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'TOKEN_EXPIRED',
+      category: 'access_denied',
+      error: 'This browser transfer token has expired. Click "Continue in browser" in CFOJ to issue a fresh token.',
+      errorZh: '该浏览器传输令牌已过期，请在 CFOJ 中重新点击“在浏览器中继续”以生成新令牌。'
+    };
+  }
+
+  const targetContestId = tokenRow.contest_id;
+  if (
+    contestId !== null &&
+    contestId !== undefined &&
+    String(contestId).trim() !== '' &&
+    Number(contestId) !== Number(targetContestId)
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'CONTEST_MISMATCH',
+      category: 'parse_error',
+      expectedContestId: targetContestId,
+      detectedContestId: Number(contestId),
+      error: `Contest ID mismatch: pending import is bound to contest #${targetContestId}, but browser payload specifies contest #${contestId}.`,
+      errorZh: `比赛 ID 不匹配：待导入比赛为 #${targetContestId}，但浏览器发送的是比赛 #${contestId}。`
+    };
+  }
+
+  let expectedIndices = JSON.parse(tokenRow.expected_indices_json || '[]');
+  if (!expectedIndices.length) {
+    const dbProbs = db
+      .prepare('SELECT problem_index FROM problems WHERE contest_id = ? ORDER BY sort_order ASC')
+      .all(targetContestId);
+    expectedIndices = dbProbs.map((p) => p.problem_index.toUpperCase());
+  }
+
+  // Parse and validate HTML before consuming token or touching cache!
+  let parsedHtml;
+  try {
+    parsedHtml = parseContestProblemsHtml(html);
+  } catch (parseErr) {
+    const isChall = parseErr.code === 'CLOUDFLARE_CHALLENGE';
+    return {
+      ok: false,
+      status: 400,
+      code: isChall ? 'CLOUDFLARE_CHALLENGE' : 'PARSE_ERROR',
+      category: isChall ? 'browser_challenge' : 'parse_error',
+      error: isChall
+        ? 'The browser tab is still showing the Cloudflare challenge page. Complete human verification until problem statements appear, then click "Send this contest to CFOJ".'
+        : `Failed to parse contest HTML: ${parseErr.message}`,
+      errorZh: isChall
+        ? '浏览器标签页仍处于 Cloudflare 验证页面，请先完成人工验证直到题目题面显示后再点击“发送本场比赛至 CFOJ”。'
+        : `解析题面 HTML 失败：${parseErr.message}`
+    };
+  }
+
+  const val = validateParsedContestProblems({
+    html,
+    parsedHtml,
+    expectedContestId: targetContestId,
+    expectedIndices,
+    sourceUrl: pageUrl
+  });
+
+  if (!val.ok) {
+    return {
+      ok: false,
+      status: 400,
+      code: val.code,
+      category: 'parse_error',
+      expectedContestId: targetContestId,
+      detectedContestId: val.detectedContestId || null,
+      missingIndices: val.missingIndices || [],
+      foundIndices: val.foundIndices || [],
+      error: val.error,
+      errorZh: val.errorZh
+    };
+  }
+
+  // Mark single-use token consumed atomically
+  const updateRes = db
+    .prepare('UPDATE browser_transfer_tokens SET used_at = ? WHERE token = ? AND used_at IS NULL')
+    .run(now, token.trim());
+  if (updateRes.changes === 0) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'TOKEN_ALREADY_USED',
+      category: 'access_denied',
+      error: 'This browser transfer token has already been used.',
+      errorZh: '该浏览器传输令牌已被使用过。'
+    };
+  }
+
+  // Write captured diagram assets (if any) and validated HTML to cache
+  const contestDir = path.join(DATA_DIR, 'contests', String(targetContestId));
+  const cacheDir = path.join(contestDir, 'cache');
+  const assetsDir = path.join(contestDir, 'assets');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.mkdirSync(assetsDir, { recursive: true });
+
+  if (Array.isArray(assets)) {
+    for (const item of assets) {
+      if (!item || !item.dataBase64) continue;
+      const rawName = item.filename || path.posix.basename((item.url || '').split('?')[0]) || '';
+      const safeName = path.basename(rawName);
+      if (safeName && /^[a-zA-Z0-9._-]+$/.test(safeName)) {
+        try {
+          fs.writeFileSync(
+            path.join(assetsDir, safeName),
+            Buffer.from(item.dataBase64, 'base64')
+          );
+        } catch {}
+      }
+    }
+  }
+
+  fs.writeFileSync(path.join(cacheDir, 'problems.html'), html, 'utf8');
+
+  judgeEvents.emit('browserTransferReceived', {
+    contestId: targetContestId,
+    problemCount: parsedHtml.problems.length,
+    indices: val.foundIndices
+  });
+
+  const runPromise = importContest(targetContestId, {
+    ...importOptions,
+    provider: importOptions.provider || tokenRow.provider,
+    uploadedProblemsHtml: html,
+    uploadedSourceUrl: pageUrl
+  });
+
+  if (!awaitPreparation) {
+    runPromise.catch(() => {});
+    return {
+      ok: true,
+      status: 202,
+      contestId: targetContestId,
+      importedProblems: val.foundIndices,
+      resumedInBackground: true
+    };
+  }
+
+  const importResult = await runPromise;
+  return {
+    ok: true,
+    status: 200,
+    contestId: targetContestId,
+    importedProblems: val.foundIndices,
+    importResult
+  };
 }
 
 export async function repairProblemStage(problemId, stage = 'all', options = {}) {
@@ -836,22 +1463,27 @@ export async function repairProblemStage(problemId, stage = 'all', options = {})
   }
 
   const fresh1 = db.prepare('SELECT * FROM problems WHERE id = ?').get(problemId);
-  if (stage === 'translation' || (stage === 'all' && fresh1.translation_status !== 'ready')) {
+  if (
+    fresh1.fetch_status === 'ready' &&
+    (stage === 'translation' || (stage === 'all' && fresh1.translation_status !== 'ready'))
+  ) {
     results.translation = await translateSingleProblem(fresh1, options);
   }
 
   const fresh2 = db.prepare('SELECT * FROM problems WHERE id = ?').get(problemId);
   if (
-    stage === 'test_prep' ||
-    (stage === 'all' && (fresh2.test_prep_status !== 'ready' || fresh2.active_package_rev === 0))
+    fresh2.fetch_status === 'ready' &&
+    (stage === 'test_prep' ||
+      (stage === 'all' && (fresh2.test_prep_status !== 'ready' || fresh2.active_package_rev === 0)))
   ) {
     results.test_prep = await prepareProblemTestPackage(fresh2, options);
   }
 
   const fresh3 = db.prepare('SELECT * FROM problems WHERE id = ?').get(problemId);
   if (
-    stage === 'editorial_prep' ||
-    (stage === 'all' && (fresh3.editorial_prep_status !== 'ready' || !fresh3.editorial_verified))
+    fresh3.fetch_status === 'ready' &&
+    (stage === 'editorial_prep' ||
+      (stage === 'all' && (fresh3.editorial_prep_status !== 'ready' || !fresh3.editorial_verified)))
   ) {
     const contest = db.prepare('SELECT * FROM contests WHERE id = ?').get(contestId);
     const allProbs = db
@@ -890,6 +1522,8 @@ export function getContestReadinessSummary(contestId) {
     .prepare('SELECT * FROM problems WHERE contest_id = ? ORDER BY sort_order ASC, problem_index ASC')
     .all(contestId);
 
+  let awaitingBrowserCount = 0;
+
   const problemSummaries = problems.map((p) => {
     let stmtEn = null;
     try {
@@ -899,9 +1533,16 @@ export function getContestReadinessSummary(contestId) {
     const canRead = p.fetch_status === 'ready' && Boolean(stmtEn);
     const canPracticeSamples = canRead && p.problem_type === 'batch' && sampleCount > 0;
     const canJudgeFull =
-      canRead && p.problem_type === 'batch' && p.active_package_rev > 0 && p.test_prep_status === 'ready';
+      canRead &&
+      p.problem_type === 'batch' &&
+      p.active_package_rev > 0 &&
+      p.test_prep_status === 'ready';
     const hasChinese = p.translation_status === 'ready' && Boolean(p.statement_zh_json);
     const hasEditorial = p.editorial_prep_status === 'ready' && p.editorial_verified === 1;
+
+    if (p.fetch_status === 'awaiting_browser') {
+      awaitingBrowserCount++;
+    }
 
     const activePkg =
       p.active_package_rev > 0
@@ -920,14 +1561,19 @@ export function getContestReadinessSummary(contestId) {
     if (!canRead) {
       incompleteItems.push({
         stage: 'fetching',
-        reason: p.fetch_error || 'Statement not fetched yet',
-        repairAction: 'retry_fetch'
+        reason:
+          p.fetch_status === 'awaiting_browser'
+            ? 'Human verification required in browser (cf-mitigated: challenge)'
+            : p.fetch_error || 'Statement not fetched yet',
+        repairAction:
+          p.fetch_status === 'awaiting_browser' ? 'continue_in_browser' : 'retry_fetch'
       });
     }
     if (!hasChinese) {
       incompleteItems.push({
         stage: 'translation',
-        reason: p.translation_error || 'Simplified Chinese translation missing or failed validation',
+        reason:
+          p.translation_error || 'Simplified Chinese translation missing or failed validation',
         repairAction: 'regenerate_translation'
       });
     }
@@ -1018,8 +1664,12 @@ export function getContestReadinessSummary(contestId) {
     };
   });
 
-  const editorialEnExists = Boolean(contest.editorial_en_path && fs.existsSync(contest.editorial_en_path));
-  const editorialZhExists = Boolean(contest.editorial_zh_path && fs.existsSync(contest.editorial_zh_path));
+  const editorialEnExists = Boolean(
+    contest.editorial_en_path && fs.existsSync(contest.editorial_en_path)
+  );
+  const editorialZhExists = Boolean(
+    contest.editorial_zh_path && fs.existsSync(contest.editorial_zh_path)
+  );
 
   const offlineReady =
     problemSummaries.length > 0 &&
@@ -1032,6 +1682,19 @@ export function getContestReadinessSummary(contestId) {
         (ps.problemType !== 'batch' || ps.capabilities.canJudgeFull) &&
         ps.capabilities.hasEditorial
     );
+
+  let browserVerification = null;
+  if (awaitingBrowserCount > 0) {
+    const tokInfo = ensureBrowserTransferTokenForPendingContest(contest.id);
+    browserVerification = {
+      required: true,
+      contestId: contest.id,
+      expectedIndices: tokInfo.expectedIndices,
+      targetUrl: tokInfo.targetUrl,
+      token: tokInfo.token,
+      expiresAt: tokInfo.expiresAt
+    };
+  }
 
   return {
     contestId: contest.id,
@@ -1050,6 +1713,8 @@ export function getContestReadinessSummary(contestId) {
       status: contest.editorial_status
     },
     offlineReady,
+    awaitingBrowserVerification: awaitingBrowserCount > 0,
+    browserVerification,
     problems: problemSummaries
   };
 }
