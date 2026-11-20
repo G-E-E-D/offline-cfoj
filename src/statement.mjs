@@ -219,6 +219,113 @@ export function isCloudflareChallengeResponse(html, headers = null) {
   return hasCfMitigatedChallengeHeader(headers) || isCloudflareChallengeHtml(html);
 }
 
+function removeBalancedDivsByClass(html, className) {
+  let out = html;
+  let pos = 0;
+  while (pos < out.length) {
+    const box = extractBalancedDivByClass(out, className, pos);
+    if (!box) break;
+    out = out.slice(0, box.outerStart) + out.slice(box.outerEnd);
+    pos = box.outerStart;
+  }
+  return out;
+}
+
+function removeBalancedDivById(html, idName) {
+  const openRe = new RegExp(`<div\\b[^>]*\\bid=["']${idName}["'][^>]*>`, 'gi');
+  let out = html;
+  let pos = 0;
+  while (pos < out.length) {
+    openRe.lastIndex = pos;
+    const match = openRe.exec(out);
+    if (!match) break;
+    const contentStart = match.index + match[0].length;
+    const tagRe = /<\/?div\b[^>]*>/gi;
+    tagRe.lastIndex = contentStart;
+    let depth = 1;
+    let m;
+    let endIdx = -1;
+    while ((m = tagRe.exec(out)) !== null) {
+      if (m[0].startsWith('</')) {
+        depth--;
+        if (depth === 0) {
+          endIdx = m.index + m[0].length;
+          break;
+        }
+      } else if (!m[0].endsWith('/>')) {
+        depth++;
+      }
+    }
+    if (endIdx === -1) break;
+    out = out.slice(0, match.index) + out.slice(endIdx);
+    pos = match.index;
+  }
+  return out;
+}
+
+export function extractContestIdFromUrl(urlStr) {
+  if (!urlStr) return null;
+  const m = String(urlStr).match(/(?:^|https?:\/\/[^/]+)\/(?:contest|gym)\/(\d+)(?:\/|$|\?|#)/i);
+  return m ? Number(m[1]) : null;
+}
+
+export function extractDocumentContestMetadata(html) {
+  if (!html) return { explicitId: null, shellIds: [] };
+
+  // 1. Check explicit document-level attributes on <html> or <body>, <meta name="cfoj-contest-id">, or <link rel="canonical">
+  const bodyOrHtmlAttr = html.match(/<(?:html|body)\b[^>]*\bdata-contest-id=["'](\d+)["'][^>]*>/i);
+  if (bodyOrHtmlAttr) {
+    const id = Number(bodyOrHtmlAttr[1]);
+    return { explicitId: id, shellIds: [id] };
+  }
+
+  const metaTag = html.match(
+    /<meta\b[^>]*\bname=["'](?:cfoj-contest-id|contest-id)["'][^>]*\bcontent=["'](\d+)["'][^>]*>/i
+  );
+  if (metaTag) {
+    const id = Number(metaTag[1]);
+    return { explicitId: id, shellIds: [id] };
+  }
+
+  const canonicalTag = html.match(
+    /<link\b[^>]*\brel=["']canonical["'][^>]*\bhref=["'][^"']*\/(?:contest|gym)\/(\d+)(?:\/|["'?#])/i
+  );
+  if (canonicalTag) {
+    const id = Number(canonicalTag[1]);
+    return { explicitId: id, shellIds: [id] };
+  }
+
+  // 2. Strip statement and sidebar regions so links inside statements and sidebars are treated strictly as references
+  let outerShell = html;
+  for (const cls of ['problemindexholder', 'problem-statement', 'ttypography', 'sidebar-menu', 'sidebox']) {
+    outerShell = removeBalancedDivsByClass(outerShell, cls);
+  }
+  outerShell = removeBalancedDivById(outerShell, 'sidebar');
+
+  const shellIds = new Set();
+  for (const m of outerShell.matchAll(
+    /href=["'](?:https?:\/\/[^/"']+)?\/(?:contest|gym)\/(\d+)(?:\/(?:problems|submit|my|standings))?\/?(?:\?[^"']*)?["']/gi
+  )) {
+    shellIds.add(Number(m[1]));
+  }
+
+  return {
+    explicitId: null,
+    shellIds: [...shellIds]
+  };
+}
+
+export function stampDocumentContestId(html, contestId) {
+  if (!html || !contestId) return html;
+  if (/<(?:html|body)\b[^>]*\bdata-contest-id=["']\d+["']/i.test(html)) {
+    return html;
+  }
+  if (/<body\b([^>]*)>/i.test(html)) {
+    return html.replace(/<body\b([^>]*)>/i, `<body data-contest-id="${Number(contestId)}"$1>`);
+  }
+  return `<div data-contest-id="${Number(contestId)}"></div>\n${html}`;
+}
+
 export function validateParsedContestProblems({
   html = '',
   parsedHtml,
@@ -228,52 +335,48 @@ export function validateParsedContestProblems({
 }) {
   const expId = Number(expectedContestId);
 
-  // 1. Check sourceUrl contest ID if present
-  if (sourceUrl) {
-    const urlMatch = String(sourceUrl).match(/codeforces\.com\/(?:contest|gym)\/(\d+)/i);
-    if (urlMatch) {
-      const urlContestId = Number(urlMatch[1]);
-      if (urlContestId !== expId) {
-        return {
-          ok: false,
-          code: 'CONTEST_MISMATCH',
-          category: 'parse_error',
-          detectedContestId: urlContestId,
-          error: `Contest ID mismatch: expected contest #${expId}, but source URL belongs to contest #${urlContestId}.`,
-          errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但来源页面属于比赛 #${urlContestId}。`
-        };
-      }
-    }
+  // 1. Check official page URL (sourceUrl) contest identity if present
+  const urlContestId = extractContestIdFromUrl(sourceUrl);
+  if (urlContestId !== null && urlContestId !== expId) {
+    return {
+      ok: false,
+      code: 'CONTEST_MISMATCH',
+      category: 'parse_error',
+      detectedContestId: urlContestId,
+      error: `Contest ID mismatch: expected contest #${expId}, but source URL belongs to contest #${urlContestId}.`,
+      errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但来源页面属于比赛 #${urlContestId}。`
+    };
   }
 
-  // 2. Check explicit contest ID attributes or links inside HTML
+  // 2. Check explicit document-level contest metadata (ignoring reference links inside statements and sidebars)
   if (html) {
-    const attrMatch = html.match(/\bdata-contest-id=["'](\d+)["']/i);
-    if (attrMatch && Number(attrMatch[1]) !== expId) {
-      const foundId = Number(attrMatch[1]);
+    const docMeta = extractDocumentContestMetadata(html);
+    if (docMeta.explicitId !== null && docMeta.explicitId !== expId) {
       return {
         ok: false,
         code: 'CONTEST_MISMATCH',
         category: 'parse_error',
-        detectedContestId: foundId,
-        error: `Contest ID mismatch: expected contest #${expId}, but HTML document is tagged for contest #${foundId}.`,
-        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面内容标记为比赛 #${foundId}。`
+        detectedContestId: docMeta.explicitId,
+        error: `Contest ID mismatch: expected contest #${expId}, but HTML document is tagged for contest #${docMeta.explicitId}.`,
+        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面文档标记属于比赛 #${docMeta.explicitId}。`
       };
     }
 
-    const linkIds = new Set();
-    for (const m of html.matchAll(/href=["'](?:https?:\/\/codeforces\.com)?\/(?:contest|gym)\/(\d+)(?:\/[^"']*)?["']/gi)) {
-      linkIds.add(Number(m[1]));
-    }
-    if (linkIds.size > 0 && !linkIds.has(expId)) {
-      const otherId = [...linkIds][0];
+    // Only check outer document shell navigation links if neither explicit document metadata nor sourceUrl identified the contest
+    if (
+      docMeta.explicitId === null &&
+      urlContestId === null &&
+      docMeta.shellIds.length > 0 &&
+      !docMeta.shellIds.includes(expId)
+    ) {
+      const otherId = docMeta.shellIds[0];
       return {
         ok: false,
         code: 'CONTEST_MISMATCH',
         category: 'parse_error',
         detectedContestId: otherId,
-        error: `Contest ID mismatch: expected contest #${expId}, but HTML links belong to contest #${otherId}.`,
-        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面内链接属于比赛 #${otherId}。`
+        error: `Contest ID mismatch: expected contest #${expId}, but document navigation belongs to contest #${otherId}.`,
+        errorZh: `比赛 ID 不匹配：待导入比赛为 #${expId}，但页面导航属于比赛 #${otherId}。`
       };
     }
   }

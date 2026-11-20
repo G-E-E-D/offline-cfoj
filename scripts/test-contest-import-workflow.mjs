@@ -3,8 +3,16 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { DATA_DIR, ROOT_DIR, getDb, setSetting } from '../src/db.mjs';
-import { startServer } from '../src/server.mjs';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ISOLATED_TEST_DIR =
+  process.env.CFOJ_DATA_DIR || path.resolve(__dirname, '..', 'data', 'test-import-workflow');
+process.env.CFOJ_DATA_DIR = ISOLATED_TEST_DIR;
+fs.rmSync(ISOLATED_TEST_DIR, { recursive: true, force: true });
+
+const { DATA_DIR, ROOT_DIR, setSetting } = await import('../src/db.mjs');
+const { startServer } = await import('../src/server.mjs');
 
 const EDGE_PATH = fs.existsSync('C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe')
   ? 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
@@ -282,6 +290,41 @@ async function startMockCfServer() {
         res.end(makeTwoProbApi(cid));
         return;
       }
+      if (cid === 2272) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: 'OK',
+            result: {
+              contest: {
+                id: 2272,
+                name: 'Codeforces Round 2272 (Div. 1 + Div. 2)',
+                type: 'ICPC',
+                phase: 'FINISHED',
+                durationSeconds: 7200
+              },
+              problems: ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((idx) => ({
+                contestId: 2272,
+                index: idx,
+                name: `Problem 2272${idx}`,
+                type: 'PROGRAMMING',
+                tags: ['math']
+              })),
+              rows: []
+            }
+          })
+        );
+        return;
+      }
+    }
+
+    if (p === '/contest/2272/problems') {
+      res.writeHead(403, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'cf-mitigated': 'challenge'
+      });
+      res.end('<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Challenge</body></html>');
+      return;
     }
 
     // Contest 4 direct HTTP problems page
@@ -558,7 +601,21 @@ async function main() {
       assert.equal(mismatchRes.status, 400);
       assert.equal(mismatchRes.data.code, 'CONTEST_MISMATCH');
 
-      // Mismatch case 2: contestId=2283 claimed, but HTML only has A..D (missing E, F, G)
+      // Mismatch case 2: conflicting <body data-contest-id="4"> even when pageUrl is omitted
+      const bodyAttrMismatchRes = await apiJson(baseUrl, '/api/browser-import/receive', {
+        method: 'POST',
+        body: JSON.stringify({
+          token: bVer2283.token,
+          contestId: 2283,
+          pageUrl: '',
+          html: contest4Html.replace('<body>', '<body data-contest-id="4">')
+        })
+      });
+      assert.equal(bodyAttrMismatchRes.status, 400);
+      assert.equal(bodyAttrMismatchRes.data.code, 'CONTEST_MISMATCH');
+      assert.equal(bodyAttrMismatchRes.data.detectedContestId, 4);
+
+      // Mismatch case 3: contestId=2283 claimed, but HTML only has A..D (missing E, F, G)
       const missingIdxRes = await apiJson(baseUrl, '/api/browser-import/receive', {
         method: 'POST',
         body: JSON.stringify({
@@ -576,7 +633,65 @@ async function main() {
         false,
         'Mismatched transfer must NOT write toContest 2283 cache'
       );
-      console.log('   ✓ Mismatched contest ID and incomplete problem list rejected without touching cache.');
+      console.log('   ✓ Mismatched contest ID (URL and body data-contest-id) and incomplete problem list rejected without touching cache.');
+
+      // 3c-bis. Regression test: Contest 2272 with an ordinary reference link to /contest/2026/problem/A inside a statement
+      console.log('\n4b. Regression test: Contest 2272 (A..G) with statement reference link to /contest/2026/problem/A...');
+      const r2272Chall = await apiJson(baseUrl, '/api/contests/import', {
+        method: 'POST',
+        body: JSON.stringify({
+          contestId: 2272,
+          codeforcesBaseUrl: mockCf.url,
+          disableFixtureFallback: true
+        })
+      });
+      assert.equal(r2272Chall.data.status, 'awaiting_browser');
+      const tok2272 = r2272Chall.data.browserVerification.token;
+
+      const problems2272 = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((idx) => ({
+        contestId: 2272,
+        index: idx,
+        name: `Round 2272 Problem ${idx}`
+      }));
+      let html2272WithRefLink = buildContest2283PostVerificationHtml(mockCf.url, problems2272)
+        .replace('<body>', '<body data-contest-id="2272">')
+        .replace(
+          'In problem <b>Round 2272 Problem A</b>',
+          'This problem is a harder version of <a href="/contest/2026/problem/A">problem 2026A</a> and <a href="https://codeforces.com/contest/2026/problem/A">full link</a>. In problem <b>Round 2272 Problem A</b>'
+        )
+        .replace(
+          '<a href="/blog/entry/139999">Tutorial</a>',
+          '<a href="/blog/entry/139999">Tutorial</a></li><li><a href="/contest/2025">Related Contest 2025</a>'
+        );
+
+      const transfer2272 = await apiJson(baseUrl, '/api/browser-import/receive', {
+        method: 'POST',
+        body: JSON.stringify({
+          token: tok2272,
+          contestId: 2272,
+          pageUrl: 'https://codeforces.com/contest/2272/problems?locale=en',
+          html: html2272WithRefLink,
+          importOptions: {
+            skipTranslation: true,
+            skipTestPrep: true,
+            skipEditorial: true
+          }
+        })
+      });
+      assert.equal(
+        transfer2272.status,
+        200,
+        `Contest 2272 with reference link to /contest/2026/problem/A should succeed, got: ${JSON.stringify(transfer2272.data)}`
+      );
+      assert.equal(transfer2272.data.ok, true);
+      assert.deepEqual(transfer2272.data.importedProblems, ['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+
+      const { data: prob2272A } = await apiJson(baseUrl, '/api/problems/2272A');
+      assert.ok(
+        prob2272A.statementEn.descriptionHtml.includes('/contest/2026/problem/A'),
+        'Reference link inside statement must be preserved'
+      );
+      console.log('   ✓ Contest 2272 accepted with statement reference link /contest/2026/problem/A and all problems A..G.');
 
       // 3d. Test One-Click Browser Extension Transfer on Contest 2283
       console.log('\n5. Testing Chrome/Edge Extension one-click transfer ("Send this contest to CFOJ") for Contest 2283...');
@@ -692,7 +807,23 @@ async function main() {
     assert.equal(prob2283AAfterOffline.translationStatus, 'ready');
     assert.equal(prob2283AAfterOffline.testPrepStatus, 'ready');
     assert.equal(prob2283AAfterOffline.editorialPrepStatus, 'ready');
-    console.log('   ✓ Cached statements for Contest 2283 reused offline with zero network calls; AI translation, tests, and editorial resumed cleanly.');
+
+    // Also verify offline reuse of cached statements for Contest 2272 (with /contest/2026/problem/A statement link)
+    const offlineReimport2272 = await apiJson(baseUrl, '/api/contests/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        contestId: 2272,
+        skipTranslation: true,
+        skipTestPrep: true,
+        skipEditorial: true
+      })
+    });
+    assert.equal(
+      offlineReimport2272.data.statementFetchSource,
+      'cache',
+      `Expected Contest 2272 cached HTML to reopen offline without CONTEST_MISMATCH, got: ${JSON.stringify(offlineReimport2272.data)}`
+    );
+    console.log('   ✓ Cached statements for Contests 2283 and 2272 reused offline with zero network calls; AI translation, tests, and editorial resumed cleanly.');
 
     console.log('\n======================================================================');
     console.log('ALL CONTEST IMPORT & BROWSER EXTENSION WORKFLOW CHECKS PASSED!');
@@ -701,6 +832,9 @@ async function main() {
   } finally {
     await srv.close();
     await mockCf.close();
+    try {
+      fs.rmSync(ISOLATED_TEST_DIR, { recursive: true, force: true });
+    } catch {}
   }
 }
 

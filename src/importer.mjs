@@ -17,6 +17,7 @@ import {
   isCloudflareChallengeResponse,
   localizeHtmlAssets,
   parseContestProblemsHtml,
+  stampDocumentContestId,
   validateParsedContestProblems,
   validateTranslatedStatement
 } from './statement.mjs';
@@ -365,10 +366,11 @@ async function fetchAndValidateContestProblems(
       });
     }
 
+    const stampedHtml = stampDocumentContestId(html, contestId);
     if (writeToCache) {
-      fs.writeFileSync(cacheFile, html, 'utf8');
+      fs.writeFileSync(cacheFile, stampedHtml, 'utf8');
     }
-    return { html, parsedHtml };
+    return { html: stampedHtml, parsedHtml };
   };
 
   // 1. Uploaded HTML (from manual file upload fallback or browser extension transfer)
@@ -1402,7 +1404,8 @@ export async function receiveBrowserContestTransfer({
     }
   }
 
-  fs.writeFileSync(path.join(cacheDir, 'problems.html'), html, 'utf8');
+  const stampedHtml = stampDocumentContestId(html, targetContestId);
+  fs.writeFileSync(path.join(cacheDir, 'problems.html'), stampedHtml, 'utf8');
 
   judgeEvents.emit('browserTransferReceived', {
     contestId: targetContestId,
@@ -1413,7 +1416,7 @@ export async function receiveBrowserContestTransfer({
   const runPromise = importContest(targetContestId, {
     ...importOptions,
     provider: importOptions.provider || tokenRow.provider,
-    uploadedProblemsHtml: html,
+    uploadedProblemsHtml: stampedHtml,
     uploadedSourceUrl: pageUrl
   });
 
