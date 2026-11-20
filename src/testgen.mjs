@@ -2,8 +2,42 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, getDb, getNowMs, getSetting } from './db.mjs';
-import { checkCaseOutput, compileCpp23, runSandboxedExecutable } from './judge.mjs';
+import {
+  checkCaseOutput,
+  compileCpp23,
+  runSandboxedExecutable,
+  runSandboxedPythonGeneratorBatch,
+  validatePythonScriptSyntax
+} from './judge.mjs';
 import { TEST_SUITE_SCHEMA, runProviderStructuredJob } from './providers.mjs';
+
+const TEST_SUITE_PROMPT = [
+  'Design a complete, problem-specific test suite for the exact Codeforces problem provided in problemMaterials.',
+  'Carefully read statement.descriptionHtml, statement.inputSpecHtml, statement.outputSpecHtml, statement.noteHtml, and statement.samples.',
+  'STRICT INPUT FORMAT FIDELITY:',
+  '- Match statement.inputSpecHtml and statement.samples 100% faithfully. NEVER invent a simplified or unrelated input format.',
+  '- If the problem has multiple test cases per file (e.g. first line integer t followed by t test cases), EVERY generated test file MUST start with t and contain exactly t valid test cases satisfying BOTH per-case constraints (e.g. l <= r, value ranges) AND global sum constraints (e.g. sum of n <= limit).',
+  '- If the problem has a single test case per file, output that exact single-test input format.',
+  'FIELD CONTRACTS:',
+  '1) generatorPy (Python 3 standard library ONLY: sys, random, math, string, collections, etc. — no third-party packages):',
+  '   - Invoked as: python generator.py <seed> <category>',
+  '   - Parse seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1, category = sys.argv[2] if len(sys.argv) > 2 else "random".',
+  '   - Initialize rng = random.Random(seed) for deterministic reproducibility.',
+  '   - Print ONLY the complete valid test input to stdout (LF newlines) and exit 0.',
+  '   - CRITICAL: Different seed values MUST produce DISTINCT valid inputs (always vary t/values/structure using rng seeded with seed, even for minimum/maximum/boundary categories) so 50+ distinct test cases are guaranteed without duplicates.',
+  '   - For small/edge categories (minimum, boundary, ties, special_structure, anti_greedy_plausible_wrong) and seeds 1..15, keep sizes modest enough that the brute-force oracleCpp runs quickly while still covering edge values and tricky traps.',
+  '   - For maximum and stress_max_complexity, generate large valid inputs near upper bounds (staying fast in Python < 2s and strictly within all sum/value constraints).',
+  '   - Only use category "exhaustive" when the ENTIRE input space of the problem has <= 100 distinct valid inputs total.',
+  '2) validatorCpp (GNU C++23, compiled with g++ -std=gnu++23 -O2 -static -lstdc++exp):',
+  '   - Reads stdin and strictly validates every constraint from inputSpecHtml (counts, ranges, l <= r, sum bounds, graph/string rules, no extra trailing tokens). Exit 0 iff valid, non-zero otherwise. Must accept all statement.samples and all generatorPy outputs.',
+  '3) referenceCpp (GNU C++23): optimal AC solution passing all samples and max-size stress tests within timeLimitMs and memoryLimitMb. Use ios::sync_with_stdio(false); cin.tie(nullptr);.',
+  '4) oracleCpp (GNU C++23): independent simpler/brute-force solution agreeing with referenceCpp on all samples and small generated cases.',
+  '5) checkerType / checkerEps / checkerCpp / checkerSelfTests:',
+  '   - Use checkerType="token" for unique-answer problems (with checkerCpp="" and checkerSelfTests=[]), "float" with checkerEps for floating-point tolerance, "exact" for exact whitespace matching, or "custom" ONLY when multiple valid outputs exist for the same input.',
+  '   - If checkerType="custom": checkerCpp is GNU C++23 invoked as checker.exe <input_file> <candidate_output_file> <expected_answer_file> (argv[1..3]), exiting 0 for AC and 1 for WA; checkerSelfTests MUST include at least 2 distinct valid candidate outputs (shouldAccept=true) and at least 1 invalid candidate output (shouldAccept=false).',
+  '6) wrongSolutions: 1-2 compiling GNU C++23 plausible wrong solutions (e.g. off-by-one, wrong greedy, missing edge case) that fail (WA/TLE/RE) on at least one generated test case or sample.',
+  '7) seeds: array of at least 55 objects { "seed": <unique positive int>, "category": <string> } covering minimum, boundary, ties, special_structure, anti_greedy_plausible_wrong, maximum, and stress_max_complexity.'
+].join('\n');
 
 function normalizeInputText(s) {
   const norm = String(s ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
@@ -86,8 +120,7 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
         statement
       },
       schema: TEST_SUITE_SCHEMA,
-      promptText:
-        'Design a deterministic C++23 input generator, strict input validator, reference solution, independent brute-force oracle, representative wrong solutions, and semantic checker (when multiple answers exist).',
+      promptText: TEST_SUITE_PROMPT,
       executableOverride: options.executableOverride || null,
       envOverride: options.envOverride || null
     });
@@ -95,8 +128,14 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
     const plan = aiRes.data;
     const targetCount = Number(options.targetTestCount || getSetting('target_test_count', '50')) || 50;
 
+    if (!plan.generatorPy || !String(plan.generatorPy).trim()) {
+      throw new Error("AI test suite plan returned an empty 'generatorPy' Python generator script");
+    }
+
     // Save source artifacts for offline reproducibility
-    fs.writeFileSync(path.join(stagingDir, 'src', 'generator.cpp'), plan.generatorCpp, 'utf8');
+    const genScriptPath = path.join(stagingDir, 'src', 'generator.py');
+    const normalizedGenPy = String(plan.generatorPy).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    fs.writeFileSync(genScriptPath, normalizedGenPy, 'utf8');
     fs.writeFileSync(path.join(stagingDir, 'src', 'validator.cpp'), plan.validatorCpp, 'utf8');
     fs.writeFileSync(path.join(stagingDir, 'src', 'reference.cpp'), plan.referenceCpp, 'utf8');
     fs.writeFileSync(path.join(stagingDir, 'src', 'oracle.cpp'), plan.oracleCpp, 'utf8');
@@ -104,9 +143,9 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
       fs.writeFileSync(path.join(stagingDir, 'src', 'checker.cpp'), plan.checkerCpp, 'utf8');
     }
 
-    // 1. Compile all tools in parallel inside CFOJ.Compile
-    const [genComp, valComp, refComp, oraComp, chkComp] = await Promise.all([
-      compileCpp23(plan.generatorCpp, path.join(stagingDir, 'build-gen'), 'generator.exe'),
+    // 1. Syntax-check Python generator and compile all C++23 tools in parallel
+    const [genCheck, valComp, refComp, oraComp, chkComp] = await Promise.all([
+      validatePythonScriptSyntax(genScriptPath),
       compileCpp23(plan.validatorCpp, path.join(stagingDir, 'build-val'), 'validator.exe'),
       compileCpp23(plan.referenceCpp, path.join(stagingDir, 'build-ref'), 'reference.exe'),
       compileCpp23(plan.oracleCpp, path.join(stagingDir, 'build-ora'), 'oracle.exe'),
@@ -114,7 +153,7 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
         ? compileCpp23(plan.checkerCpp, stagingDir, 'checker.exe')
         : Promise.resolve({ ok: true, exePath: null })
     ]);
-    if (!genComp.ok) throw new Error(`Generator compilation failed: ${genComp.diagnostics}`);
+    if (!genCheck.ok) throw new Error(`Python generator syntax/runtime check failed: ${genCheck.diagnostics}`);
     if (!valComp.ok) throw new Error(`Validator compilation failed: ${valComp.diagnostics}`);
     if (!refComp.ok) throw new Error(`Reference solution compilation failed: ${refComp.diagnostics}`);
     if (!oraComp.ok) throw new Error(`Brute-force oracle compilation failed: ${oraComp.diagnostics}`);
@@ -248,22 +287,38 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
       });
     }
 
-    // 3. Generate, validate, deduplicate, and cross-check generated test cases
-    const plannedSeeds = Array.isArray(plan.seeds) ? [...plan.seeds] : [];
+    // 3. Generate, validate, deduplicate, and cross-check generated test cases using Python generator
+    const rawSeeds = Array.isArray(plan.seeds) ? plan.seeds : [];
+    const plannedSeeds = [];
+    const seenSeedNums = new Set();
+    for (const s of rawSeeds) {
+      const sv = Number(typeof s === 'object' ? s.seed : s);
+      if (!Number.isInteger(sv) || seenSeedNums.has(sv)) continue;
+      seenSeedNums.add(sv);
+      plannedSeeds.push({
+        seed: sv,
+        category: (typeof s === 'object' ? s.category : null) || 'generated'
+      });
+    }
     const fallbackCategories = [
       'minimum',
-      'maximum',
       'boundary',
       'ties',
       'special_structure',
       'anti_greedy_plausible_wrong',
+      'maximum',
       'stress_max_complexity'
     ];
-    for (let extraSeed = plannedSeeds.length + 1; extraSeed <= targetCount + 60; extraSeed++) {
+    let nextExtraSeed = 1;
+    const minPlannedCount = targetCount + 80;
+    while (plannedSeeds.length < minPlannedCount) {
+      while (seenSeedNums.has(nextExtraSeed)) nextExtraSeed++;
+      seenSeedNums.add(nextExtraSeed);
       plannedSeeds.push({
-        seed: extraSeed,
-        category: fallbackCategories[extraSeed % fallbackCategories.length]
+        seed: nextExtraSeed,
+        category: fallbackCategories[nextExtraSeed % fallbackCategories.length]
       });
+      nextExtraSeed++;
     }
 
     const usedSeeds = [];
@@ -273,21 +328,26 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
       ? Math.min(99, Math.max(targetCount, 99))
       : targetCount;
 
-    const BATCH_SIZE = 8;
+    const BATCH_SIZE = 16;
     for (let bStart = 0; bStart < plannedSeeds.length && generatedCount < desiredGenerated; bStart += BATCH_SIZE) {
-      const batch = plannedSeeds.slice(bStart, bStart + BATCH_SIZE);
+      const batch = plannedSeeds.slice(bStart, bStart + BATCH_SIZE).map((seedItem) => ({
+        seed: typeof seedItem === 'object' ? seedItem.seed : seedItem,
+        category: (typeof seedItem === 'object' ? seedItem.category : null) || 'generated'
+      }));
+
+      const pyBatchRuns = await runSandboxedPythonGeneratorBatch(genScriptPath, batch, {
+        memoryLimitMb: 512,
+        outputLimitBytes: 32 * 1024 * 1024
+      });
+
       const batchResults = await Promise.all(
-        batch.map(async (seedItem) => {
-          const seedVal = typeof seedItem === 'object' ? seedItem.seed : seedItem;
-          const category = (typeof seedItem === 'object' ? seedItem.category : null) || 'generated';
-          const genRun = await runSandboxedExecutable(
-            genComp.exePath,
-            '',
-            { timeLimitMs: 3000, memoryLimitMb: 256 },
-            { args: [String(seedVal)] }
-          );
-          if (genRun.status !== 'OK') {
-            throw new Error(`Generator failed on seed ${seedVal}: ${genRun.status} (${genRun.detail || ''})`);
+        batch.map(async (seedItem, idx) => {
+          const seedVal = seedItem.seed;
+          const category = seedItem.category;
+          const genRun = pyBatchRuns[idx];
+          if (!genRun || genRun.status !== 'OK') {
+            const errDetail = [genRun?.stderr?.trim(), genRun?.detail].filter(Boolean).join(' | ');
+            throw new Error(`Python generator failed on seed ${seedVal} (${category}): ${genRun?.status || 'FAIL'}${errDetail ? ` (${errDetail})` : ''}`);
           }
           const normIn = normalizeInputText(genRun.stdout);
           if (!normIn) return null;
@@ -301,13 +361,15 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
             })
           ]);
           if (valRun.status !== 'OK' || valRun.exitCode !== 0) {
+            const valErr = [valRun.stderr?.trim(), valRun.detail].filter(Boolean).join(' | ');
+            const preview = normIn.slice(0, 120).replace(/\n/g, '\\n');
             throw new Error(
-              `Generated input for seed ${seedVal} (category=${category}) failed validator (exit=${valRun.exitCode})`
+              `Generated input for seed ${seedVal} (category=${category}) failed validator (status=${valRun.status}, exit=${valRun.exitCode}${valErr ? `, ${valErr}` : ''}, preview="${preview}")`
             );
           }
           if (refRun.status !== 'OK') {
             throw new Error(
-              `Reference solution failed on generated seed ${seedVal} (category=${category}): ${refRun.status}`
+              `Reference solution failed on generated seed ${seedVal} (category=${category}): ${refRun.status}${refRun.detail ? ` (${refRun.detail})` : ''}`
             );
           }
           return {
@@ -325,44 +387,49 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
         const { seedVal, category, normIn, hash, normAns } = item;
         if (seenHashes.has(hash)) continue;
 
-        // Cross-check small cases with independent brute-force oracle
-        if (oracleCrossChecks.length < 15 && normIn.length <= 2048) {
+        // Cross-check small non-stress cases with independent brute-force oracle
+        const oracleEligible =
+          category !== 'maximum' &&
+          category !== 'stress_max_complexity' &&
+          normIn.length <= 4096;
+        if (oracleCrossChecks.length < 15 && oracleEligible) {
           const oraRun = await runSandboxedExecutable(oraComp.exePath, normIn, {
             timeLimitMs: Math.max(problemRow.time_limit_ms, 3000),
             memoryLimitMb: problemRow.memory_limit_mb
           });
-          if (oraRun.status !== 'OK') {
+          if (oraRun.status === 'OK') {
+            const oraCheck = await checkCaseOutput(checkerConfig, normIn, oraRun.stdout, normAns);
+            if (!oraCheck.ok) {
+              const disagreement = {
+                caseName: `gen-${generatedCount + 1}`,
+                category,
+                seed: seedVal,
+                input: normIn,
+                referenceOutput: normAns,
+                oracleOutput: normalizeInputText(oraRun.stdout),
+                comment: oraCheck.comment
+              };
+              return await handleOracleDisagreement(
+                db,
+                problemRow,
+                nextRev,
+                stagingDir,
+                finalPkgDir,
+                disagreement
+              );
+            }
+            oracleCrossChecks.push({
+              caseName: `gen-${generatedCount + 1}`,
+              seed: seedVal,
+              category,
+              passed: true,
+              comment: oraCheck.comment
+            });
+          } else if (oraRun.status !== 'TLE') {
             throw new Error(
               `Brute-force oracle failed on small generated seed ${seedVal}: ${oraRun.status} (${oraRun.detail || ''})`
             );
           }
-          const oraCheck = await checkCaseOutput(checkerConfig, normIn, oraRun.stdout, normAns);
-          if (!oraCheck.ok) {
-            const disagreement = {
-              caseName: `gen-${generatedCount + 1}`,
-              category,
-              seed: seedVal,
-              input: normIn,
-              referenceOutput: normAns,
-              oracleOutput: normalizeInputText(oraRun.stdout),
-              comment: oraCheck.comment
-            };
-            return await handleOracleDisagreement(
-              db,
-              problemRow,
-              nextRev,
-              stagingDir,
-              finalPkgDir,
-              disagreement
-            );
-          }
-          oracleCrossChecks.push({
-            caseName: `gen-${generatedCount + 1}`,
-            seed: seedVal,
-            category,
-            passed: true,
-            comment: oraCheck.comment
-          });
         }
 
         seenHashes.add(hash);
@@ -449,7 +516,7 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
     }
 
     // Cleanup temporary tool build dirs except checker.exe
-    for (const tmpBin of ['build-gen', 'build-val', 'build-ref', 'build-ora', 'solution.cpp', 'compile.out', 'compile.err']) {
+    for (const tmpBin of ['build-val', 'build-ref', 'build-ora', 'solution.cpp', 'compile.out', 'compile.err']) {
       try {
         fs.rmSync(path.join(stagingDir, tmpBin), { recursive: true, force: true });
       } catch {}
@@ -460,6 +527,9 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
       provider: aiRes.provider,
       providerLabel: aiRes.label,
       isFixture: aiRes.isFixture,
+      generatorLanguage: 'python',
+      generatorFile: 'src/generator.py',
+      pythonVersion: genCheck.pythonVersion || null,
       planSummary: plan.planSummary,
       sampleCount: samples.length,
       generatedCount,
@@ -480,6 +550,10 @@ export async function prepareProblemTestPackage(problemRow, options = {}) {
       problemIndex: problemRow.problem_index,
       revision: nextRev,
       createdAt: getNowMs(),
+      generator: {
+        language: 'python',
+        file: 'src/generator.py'
+      },
       checker: {
         type: checkerConfig.type,
         eps: checkerConfig.eps

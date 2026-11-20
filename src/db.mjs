@@ -197,6 +197,7 @@ export function getDb() {
     agy_bin: process.env.CFOJ_AGY_BIN || 'agy',
     target_test_count: '50',
     compiler_path: process.env.CFOJ_GPP_BIN || 'C:\\YX\\mingw64\\bin\\g++.exe',
+    python_path: process.env.CFOJ_PYTHON_BIN || 'python',
     clock_offset_ms: '0',
     offline_mode: 'false'
   };
@@ -223,6 +224,47 @@ export function getDb() {
         if (!valid) stale.run('旧译文未通过校验，请重新生成中文题面。 / Regenerate this translation.', row.id);
       }
       db.exec('PRAGMA user_version = 1; COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  // Old versions could persist demo fixture test suites (e.g. Watermelon 1..100 or dummy 100001+)
+  // onto real non-demo contests. Invalidate those placeholder packages once so users regenerate real tests.
+  if (db.prepare('PRAGMA user_version').get().user_version < 2) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const staleProb = db.prepare(
+        "UPDATE problems SET active_package_rev = 0, test_prep_status = 'failed', test_prep_error = ?, updated_at = ? WHERE id = ?"
+      );
+      const stalePkg = db.prepare(
+        "UPDATE test_packages SET status = 'failed_validation' WHERE problem_id = ? AND revision = ?"
+      );
+      const rows = db
+        .prepare(
+          `SELECT p.id, p.active_package_rev, tp.validation_json
+           FROM problems p
+           JOIN test_packages tp ON tp.problem_id = p.id AND tp.revision = p.active_package_rev
+           WHERE p.contest_id != 4 AND p.active_package_rev > 0`
+        )
+        .all();
+      const migNow = Date.now();
+      for (const row of rows) {
+        let isFixture = false;
+        try {
+          isFixture = Boolean(JSON.parse(row.validation_json || '{}').isFixture);
+        } catch {}
+        if (isFixture) {
+          stalePkg.run(row.id, row.active_package_rev);
+          staleProb.run(
+            '旧版示例占位测试数据已失效，请点击“重新生成数据”使用 AI Python 生成器重新生成。 / Legacy fixture test data is invalid; regenerate test data.',
+            migNow,
+            row.id
+          );
+        }
+      }
+      db.exec('PRAGMA user_version = 2; COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;

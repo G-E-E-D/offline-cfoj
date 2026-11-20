@@ -16,9 +16,11 @@ import {
   getActiveBrowserTransferToken,
   getContestReadinessSummary,
   importContest,
+  isContestTestRegenRunning,
   issueBrowserTransferToken,
   parseContestIdInput,
   receiveBrowserContestTransfer,
+  regenerateContestTestData,
   repairProblemStage
 } from './importer.mjs';
 import {
@@ -464,6 +466,7 @@ export function createCfojHttpServer() {
           'agy_bin',
           'target_test_count',
           'compiler_path',
+          'python_path',
           'clock_offset_ms',
           'offline_mode',
           'allow_fixture_fallback'
@@ -514,6 +517,7 @@ export function createCfojHttpServer() {
             problemCount: summary?.problems?.length || 0,
             solvedCount,
             editorialStatus: c.editorial_status,
+            regeneratingTests: isContestTestRegenRunning(c.id),
             activeVp: activeVp
               ? {
                   id: activeVp.id,
@@ -564,6 +568,51 @@ export function createCfojHttpServer() {
         }
 
         const result = await importContest(contestId, importOpts);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      // Regenerate test data for all problems in a contest using AI Python generator
+      const regenTestsMatch = pathname.match(/^\/api\/contests\/(\d+)\/regenerate-tests$/);
+      if (req.method === 'POST' && regenTestsMatch) {
+        const contestId = parseInt(regenTestsMatch[1], 10);
+        const db = getDb();
+        const contestExists = db.prepare('SELECT id FROM contests WHERE id = ?').get(contestId);
+        if (!contestExists) {
+          sendJson(res, 404, { ok: false, error: `Contest ${contestId} not found` });
+          return;
+        }
+        if (isContestTestRegenRunning(contestId)) {
+          sendJson(res, 409, {
+            ok: false,
+            code: 'ALREADY_RUNNING',
+            error: `Test data regeneration is already running for contest #${contestId}.`
+          });
+          return;
+        }
+
+        const body = await readJsonBody(req);
+        const awaitCompletion = body.awaitCompletion !== false;
+        const regenOpts = {
+          provider: body.provider || getSetting('ai_provider', 'codex'),
+          targetTestCount: body.targetTestCount ? Number(body.targetTestCount) : undefined,
+          executableOverride: body.useFixture
+            ? getFixtureExecutable(body.provider || getSetting('ai_provider', 'codex'))
+            : null
+        };
+
+        if (!awaitCompletion) {
+          regenerateContestTestData(contestId, regenOpts).catch(() => {});
+          sendJson(res, 202, {
+            ok: true,
+            started: true,
+            contestId,
+            provider: regenOpts.provider
+          });
+          return;
+        }
+
+        const result = await regenerateContestTestData(contestId, regenOpts);
         sendJson(res, 200, result);
         return;
       }
@@ -619,6 +668,7 @@ export function createCfojHttpServer() {
           problems: problemsList,
           problemsHiddenUntilStart: hideProblems,
           spoilersHidden: hideSpoilers,
+          regeneratingTests: isContestTestRegenRunning(contestId),
           activeVp,
           latestVp,
           lastImportJob: lastJob

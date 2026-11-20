@@ -19,11 +19,77 @@ export function resolveCompilerPath() {
 }
 
 let cachedToolchainDescription = null;
+let cachedPythonRuntime = null;
+
+export function resolvePythonRuntime(forceRefresh = false) {
+  const configured = String(process.env.CFOJ_PYTHON_BIN || getSetting('python_path', 'python') || '').trim();
+  if (!forceRefresh && cachedPythonRuntime && cachedPythonRuntime.key === configured && cachedPythonRuntime.ok) {
+    return cachedPythonRuntime;
+  }
+
+  const rawCandidates = [];
+  if (configured) rawCandidates.push([configured]);
+  rawCandidates.push(['python'], ['python3'], ['py', '-3']);
+
+  const seen = new Set();
+  const candidates = [];
+  for (const cand of rawCandidates) {
+    const key = cand.join('\0').toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push(cand);
+    }
+  }
+
+  const probeCode = 'import sys; print(sys.executable); print(sys.version.split()[0])';
+  let lastDetail = '';
+  for (const [cmd, ...prefixArgs] of candidates) {
+    try {
+      const res = spawnSync(cmd, [...prefixArgs, '-c', probeCode], {
+        encoding: 'utf8',
+        timeout: 5000,
+        windowsHide: true
+      });
+      if (res.status === 0 && res.stdout) {
+        const lines = res.stdout.trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        const exePath = lines[0] || '';
+        const version = lines[1] || '';
+        if (exePath && version.startsWith('3.')) {
+          const info = {
+            ok: true,
+            key: configured,
+            configured,
+            pythonPath: exePath,
+            version,
+            error: null
+          };
+          cachedPythonRuntime = info;
+          return info;
+        }
+      } else {
+        const msg = `${res.stderr || ''}\n${res.stdout || ''}`.trim();
+        if (msg) lastDetail = msg;
+      }
+    } catch (err) {
+      lastDetail = err.message;
+    }
+  }
+
+  return {
+    ok: false,
+    key: configured,
+    configured,
+    pythonPath: null,
+    version: null,
+    error: `Python 3 interpreter not found or unavailable (configured='${configured || 'python'}'). Install Python 3 or update python_path in Settings.${lastDetail ? ` Detail: ${lastDetail}` : ''}`
+  };
+}
 
 export function checkJudgeEnvironment() {
   const compilerPath = resolveCompilerPath();
   const sandboxExists = fs.existsSync(SANDBOX_EXE);
   const compilerExists = fs.existsSync(compilerPath);
+  const pyInfo = resolvePythonRuntime();
 
   if (!sandboxExists) {
     return {
@@ -32,6 +98,10 @@ export function checkJudgeEnvironment() {
       compilerExists,
       compilerPath,
       sandboxPath: SANDBOX_EXE,
+      pythonOk: pyInfo.ok,
+      pythonPath: pyInfo.pythonPath,
+      pythonVersion: pyInfo.version,
+      pythonError: pyInfo.error,
       error: `Sandbox runner binary not found at ${SANDBOX_EXE}. Run setup first: powershell -ExecutionPolicy Bypass -File .\\scripts\\setup.ps1`
     };
   }
@@ -43,6 +113,10 @@ export function checkJudgeEnvironment() {
       compilerExists: false,
       compilerPath,
       sandboxPath: SANDBOX_EXE,
+      pythonOk: pyInfo.ok,
+      pythonPath: pyInfo.pythonPath,
+      pythonVersion: pyInfo.version,
+      pythonError: pyInfo.error,
       error: `GNU C++23 compiler not found at ${compilerPath}. Install MinGW-w64 GCC 14+ or update compiler_path in Settings.`
     };
   }
@@ -59,6 +133,10 @@ export function checkJudgeEnvironment() {
       compilerExists: true,
       compilerPath,
       sandboxPath: SANDBOX_EXE,
+      pythonOk: pyInfo.ok,
+      pythonPath: pyInfo.pythonPath,
+      pythonVersion: pyInfo.version,
+      pythonError: pyInfo.error,
       error: `AppContainer check failed: ${(checkRun.stderr || checkRun.stdout || 'unknown error').trim()}. Run setup: powershell -ExecutionPolicy Bypass -File .\\scripts\\setup.ps1`
     };
   }
@@ -76,7 +154,11 @@ export function checkJudgeEnvironment() {
     compilerPath,
     sandboxPath: SANDBOX_EXE,
     runContainerSid: runSid,
-    toolchain: cachedToolchainDescription
+    toolchain: cachedToolchainDescription,
+    pythonOk: pyInfo.ok,
+    pythonPath: pyInfo.pythonPath,
+    pythonVersion: pyInfo.version,
+    pythonError: pyInfo.error
   };
 }
 
@@ -295,6 +377,281 @@ export async function runSandboxedExecutable(exePath, inputContent, limits = {},
       // ignore cleanup error
     }
   }
+}
+
+export async function validatePythonScriptSyntax(scriptPath) {
+  const py = resolvePythonRuntime();
+  if (!py.ok) {
+    return { ok: false, diagnostics: py.error };
+  }
+  const runDir = path.join(
+    DATA_DIR,
+    'tmp',
+    `pycheck-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+  );
+  fs.mkdirSync(runDir, { recursive: true });
+  const stdoutPath = path.join(runDir, 'stdout.txt');
+  const stderrPath = path.join(runDir, 'stderr.txt');
+  try {
+    const spec = {
+      container: 'CFOJ.Run',
+      noContainer: true,
+      args: [
+        py.pythonPath,
+        '-I',
+        '-B',
+        '-X',
+        'utf8',
+        '-c',
+        'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), filename=sys.argv[1])',
+        scriptPath
+      ],
+      cwd: runDir,
+      env: ['PYTHONUTF8=1', `TEMP=${runDir}`, `TMP=${runDir}`, 'SystemRoot=C:\\Windows'],
+      stdoutFile: stdoutPath,
+      stderrFile: stderrPath,
+      timeLimitMs: 5000,
+      wallLimitMs: 10000,
+      memoryLimitBytes: 256 * 1024 * 1024,
+      maxProcesses: 4,
+      outputLimitBytes: 1024 * 1024,
+      stderrLimitBytes: 128 * 1024
+    };
+    const res = await invokeSandbox(spec);
+    const stdout = fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, 'utf8') : '';
+    const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, 'utf8') : '';
+    if (res.status === 'OK' && res.exitCode === 0) {
+      return { ok: true, pythonPath: py.pythonPath, pythonVersion: py.version };
+    }
+    return {
+      ok: false,
+      diagnostics: [stderr, stdout, res.detail].filter(Boolean).join('\n').trim() || `Python syntax check failed (${res.status})`
+    };
+  } finally {
+    try {
+      fs.rmSync(runDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+export async function runSandboxedPythonScript(scriptPath, args = [], limits = {}) {
+  const py = resolvePythonRuntime();
+  if (!py.ok) {
+    return {
+      status: 'FAIL',
+      exitCode: 1,
+      cpuMs: 0,
+      wallMs: 0,
+      peakMemoryBytes: 0,
+      outputBytes: 0,
+      stdout: '',
+      stderr: '',
+      detail: py.error
+    };
+  }
+
+  const runDir = path.join(
+    DATA_DIR,
+    'tmp',
+    `pygen-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`
+  );
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const stdoutPath = path.join(runDir, 'stdout.txt');
+  const stderrPath = path.join(runDir, 'stderr.txt');
+
+  const timeLimitMs = Number(limits.timeLimitMs) || 5000;
+  const memoryLimitMb = Number(limits.memoryLimitMb) || 512;
+  const outputLimitBytes = Number(limits.outputLimitBytes) || 32 * 1024 * 1024;
+
+  const spec = {
+    container: 'CFOJ.Run',
+    noContainer: true,
+    args: [py.pythonPath, '-I', '-B', '-X', 'utf8', scriptPath, ...args.map((a) => String(a))],
+    cwd: runDir,
+    env: ['PYTHONUTF8=1', `TEMP=${runDir}`, `TMP=${runDir}`, 'SystemRoot=C:\\Windows'],
+    stdoutFile: stdoutPath,
+    stderrFile: stderrPath,
+    timeLimitMs,
+    wallLimitMs: Math.max(timeLimitMs * 2 + 2000, 8000),
+    memoryLimitBytes: memoryLimitMb * 1024 * 1024,
+    maxProcesses: 4,
+    outputLimitBytes,
+    stderrLimitBytes: 128 * 1024
+  };
+
+  try {
+    const res = await invokeSandbox(spec);
+    const stdout = fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, 'utf8') : '';
+    const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, 'utf8') : '';
+    return {
+      ...res,
+      stdout,
+      stderr
+    };
+  } finally {
+    try {
+      fs.rmSync(runDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+export async function runSandboxedPythonGeneratorBatch(scriptPath, items = [], limits = {}) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const py = resolvePythonRuntime();
+  if (!py.ok) {
+    return items.map(() => ({
+      status: 'FAIL',
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+      detail: py.error
+    }));
+  }
+
+  const runDir = path.join(
+    DATA_DIR,
+    'tmp',
+    `pybatch-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`
+  );
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const jobsPath = path.join(runDir, 'jobs.json');
+  const resultsPath = path.join(runDir, 'results.json');
+  const runnerPath = path.join(runDir, '_runner.py');
+  const stdoutPath = path.join(runDir, 'runner.out');
+  const stderrPath = path.join(runDir, 'runner.err');
+
+  fs.writeFileSync(
+    jobsPath,
+    JSON.stringify(items.map((it) => ({ seed: String(it.seed), category: String(it.category || 'generated') }))),
+    'utf8'
+  );
+
+  const runnerPy = `import io, json, os, random, sys, traceback
+
+script_path = sys.argv[1]
+jobs_path = sys.argv[2]
+out_dir = sys.argv[3]
+results_path = sys.argv[4]
+
+with open(script_path, "r", encoding="utf-8") as f:
+    src = f.read()
+code_obj = compile(src, script_path, "exec")
+
+with open(jobs_path, "r", encoding="utf-8") as f:
+    jobs = json.load(f)
+
+real_stdout = sys.stdout
+results = []
+for idx, job in enumerate(jobs):
+    buf = io.BytesIO()
+    wrapper = io.TextIOWrapper(buf, encoding="utf-8", newline="\\n", write_through=True)
+    sys.argv = [script_path, str(job["seed"]), str(job["category"])]
+    random.seed(0)
+    err_msg = None
+    exit_code = 0
+    try:
+        sys.stdout = wrapper
+        ns = {
+            "__name__": "__main__",
+            "__file__": script_path,
+            "__package__": None,
+            "__builtins__": __builtins__,
+        }
+        exec(code_obj, ns)
+    except SystemExit as se:
+        if se.code is None:
+            exit_code = 0
+        elif isinstance(se.code, int):
+            exit_code = se.code
+        else:
+            exit_code = 1
+            err_msg = str(se.code)
+        if exit_code != 0 and not err_msg:
+            err_msg = f"Exited with code {exit_code}"
+    except Exception:
+        exit_code = 1
+        err_msg = traceback.format_exc()
+    finally:
+        try:
+            wrapper.flush()
+        except Exception:
+            pass
+        sys.stdout = real_stdout
+    if exit_code == 0 and err_msg is None:
+        out_file = os.path.join(out_dir, f"case_{idx}.in")
+        with open(out_file, "wb") as cf:
+            cf.write(buf.getvalue())
+        results.append({"ok": True, "exitCode": 0, "file": f"case_{idx}.in", "error": ""})
+    else:
+        results.append({"ok": False, "exitCode": exit_code, "file": "", "error": err_msg or "Generator error"})
+
+with open(results_path, "w", encoding="utf-8") as rf:
+    json.dump(results, rf)
+`;
+  fs.writeFileSync(runnerPath, runnerPy, 'utf8');
+
+  const timeLimitMs = Number(limits.timeLimitMs) || Math.min(30000, Math.max(8000, items.length * 1500));
+  const memoryLimitMb = Number(limits.memoryLimitMb) || 512;
+
+  try {
+    const res = await invokeSandbox({
+      container: 'CFOJ.Run',
+      noContainer: true,
+      args: [py.pythonPath, '-I', '-B', '-X', 'utf8', runnerPath, scriptPath, jobsPath, runDir, resultsPath],
+      cwd: runDir,
+      env: ['PYTHONUTF8=1', `TEMP=${runDir}`, `TMP=${runDir}`, 'SystemRoot=C:\\Windows'],
+      stdoutFile: stdoutPath,
+      stderrFile: stderrPath,
+      timeLimitMs,
+      wallLimitMs: Math.max(timeLimitMs * 2 + 2000, 15000),
+      memoryLimitBytes: memoryLimitMb * 1024 * 1024,
+      maxProcesses: 4,
+      outputLimitBytes: 2 * 1024 * 1024,
+      stderrLimitBytes: 256 * 1024
+    });
+
+    if (res.status === 'OK' && fs.existsSync(resultsPath)) {
+      const parsed = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+      if (Array.isArray(parsed) && parsed.length === items.length) {
+        return parsed.map((entry) => {
+          if (entry.ok) {
+            const fp = path.join(runDir, entry.file);
+            return {
+              status: 'OK',
+              exitCode: 0,
+              stdout: fs.existsSync(fp) ? fs.readFileSync(fp, 'utf8') : '',
+              stderr: '',
+              detail: ''
+            };
+          }
+          return {
+            status: 'RE',
+            exitCode: entry.exitCode || 1,
+            stdout: '',
+            stderr: entry.error || '',
+            detail: entry.error || 'Generator exited with error'
+          };
+        });
+      }
+    }
+  } finally {
+    try {
+      fs.rmSync(runDir, { recursive: true, force: true });
+    } catch {}
+  }
+
+  // Fallback to per-seed execution if the batch runner failed or timed out
+  return await Promise.all(
+    items.map((it) =>
+      runSandboxedPythonScript(scriptPath, [String(it.seed), String(it.category || 'generated')], {
+        timeLimitMs: 5000,
+        memoryLimitMb,
+        outputLimitBytes: limits.outputLimitBytes || 32 * 1024 * 1024
+      })
+    )
+  );
 }
 
 function tokenize(text) {

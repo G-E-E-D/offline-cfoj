@@ -113,7 +113,7 @@ test('antigravity uses stream-json stdin with inline materials (never -p -) and 
     executableOverride: exe,
     envOverride: { CFOJ_TEST_ARGV_FILE: argvFile, CFOJ_TEST_STDIN_FILE: stdinFile }
   });
-  assert.ok(res.data.generatorCpp);
+  assert.ok(res.data.generatorPy);
 
   const argv = JSON.parse(fs.readFileSync(argvFile, 'utf8'));
   assert.equal(argv[argv.indexOf('--input-format') + 1], 'stream-json');

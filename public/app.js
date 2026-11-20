@@ -29,6 +29,10 @@ const I18N = {
     readEditorialBtn: 'Editorial (Markdown)',
     editorialLockedBtn: 'Editorial Locked (Active VP)',
     reimportBtn: 'Re-import / Resume',
+    regenTestsBtn: 'Regenerate Test Data',
+    regeneratingTestsBtn: 'Regenerating Tests...',
+    regenProbTestsBtn: 'Regen Tests',
+    regenTestsProgressTitle: 'Regenerating Test Data (AI Python Generator)',
     problemOrderTitle: 'Contest Problems & Local Readiness',
     colIndex: '#',
     colTitle: 'Title',
@@ -149,6 +153,10 @@ const I18N = {
     readEditorialBtn: '查看题解 (Markdown)',
     editorialLockedBtn: '题解已锁定 (VP 进行中)',
     reimportBtn: '重新导入 / 断点续传',
+    regenTestsBtn: '重新生成数据',
+    regeneratingTestsBtn: '正在重新生成数据...',
+    regenProbTestsBtn: '重生成数据',
+    regenTestsProgressTitle: '正在重新生成测试数据（AI Python 生成器）',
     problemOrderTitle: '比赛题目与本地评测就绪状态',
     colIndex: '题号',
     colTitle: '题目名称',
@@ -271,8 +279,82 @@ const state = {
   editorialViewMode: 'rendered',
   activeVpTimer: null,
   draftSaveTimer: null,
-  uploadedProblemsHtml: null
+  uploadedProblemsHtml: null,
+  activeRegenProgress: {}
 };
+
+function renderRegenProgressHtml(progress) {
+  if (!progress || !progress.steps) return '';
+  const st = progress.status || 'running';
+  const cls =
+    st === 'completed'
+      ? 'alert-ok'
+      : st === 'failed'
+        ? 'alert-err'
+        : st === 'partial'
+          ? 'alert-warn'
+          : 'alert-info';
+  const probs = Object.values(progress.steps.problems || {});
+  const doneCount = progress.steps.completedProblems ?? probs.filter((p) => p.test_prep && p.test_prep !== 'pending' && p.test_prep !== 'running').length;
+  const totalCount = progress.steps.totalProblems ?? probs.length;
+  const statusLabel =
+    st === 'completed'
+      ? (state.lang === 'zh-CN' ? '全部完成' : 'Completed')
+      : st === 'partial'
+        ? (state.lang === 'zh-CN' ? '部分题目失败' : 'Completed with errors')
+        : st === 'failed'
+          ? (state.lang === 'zh-CN' ? '失败' : 'Failed')
+          : (state.lang === 'zh-CN' ? '进行中' : 'Running');
+  const pills = probs
+    .map((p) => {
+      const pSt = p.test_prep || 'pending';
+      const pCls =
+        pSt === 'ready'
+          ? 'badge-ok'
+          : pSt === 'failed'
+            ? 'badge-err'
+            : pSt === 'running'
+              ? 'badge-info'
+              : 'badge-warn';
+      return `<span class="badge ${pCls}" title="${escapeHtml(p.testPrepError || pSt)}">${escapeHtml(p.index)}: ${escapeHtml(pSt.toUpperCase())}</span>`;
+    })
+    .join('');
+  return `<div class="alert ${cls}">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.45rem;">
+      <strong>${escapeHtml(t('regenTestsProgressTitle'))} — #${escapeHtml(progress.contestId)} (${escapeHtml(statusLabel)}: ${doneCount}/${totalCount})</strong>
+      <span class="badge">${escapeHtml(progress.steps.provider || '')}</span>
+    </div>
+    <div style="display:flex;gap:0.35rem;flex-wrap:wrap;">${pills}</div>
+    ${progress.error ? `<div style="margin-top:0.4rem;font-size:0.84rem;">${escapeHtml(progress.error)}</div>` : ''}
+  </div>`;
+}
+
+async function triggerContestRegenTests(contestId, btnEl, progressBoxEl) {
+  const cid = Number(contestId);
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = t('regeneratingTestsBtn');
+  }
+  if (progressBoxEl) {
+    progressBoxEl.classList.remove('hidden');
+    progressBoxEl.innerHTML = `<div class="alert alert-info">${escapeHtml(t('regenTestsProgressTitle'))} — #${cid}...</div>`;
+  }
+  try {
+    await apiFetch(`/api/contests/${cid}/regenerate-tests`, {
+      method: 'POST',
+      body: JSON.stringify({ awaitCompletion: false })
+    });
+  } catch (err) {
+    if (progressBoxEl) {
+      progressBoxEl.classList.remove('hidden');
+      progressBoxEl.innerHTML = `<div class="alert alert-err">${escapeHtml(err.message)}</div>`;
+    }
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = t('regenTestsBtn');
+    }
+  }
+}
 
 function t(key) {
   const dict = I18N[state.lang] || I18N.en;
@@ -635,6 +717,12 @@ async function renderContestsDashboard() {
         <h2 class="card-title">${t('contestsLibraryTitle')}</h2>
         <a href="#/problemset" class="btn btn-sm">${t('navProblemset')} &rarr;</a>
       </div>
+      <div id="dashboard-regen-progress-box" class="${Object.values(state.activeRegenProgress).some((p) => p.status === 'running') ? '' : 'hidden'}" style="margin-bottom:1rem;">
+        ${Object.values(state.activeRegenProgress)
+          .filter((p) => p.status === 'running')
+          .map((p) => renderRegenProgressHtml(p))
+          .join('')}
+      </div>
       ${
         contestsData.contests.length === 0
           ? `<p style="color:var(--text-muted);">${t('noContestsYet')}</p>`
@@ -675,6 +763,12 @@ async function renderContestsDashboard() {
                           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">
                             <a href="#/contest/${c.id}" class="btn btn-primary btn-sm">${t('openContestBtn')}</a>
                             <a href="#/editorial/${c.id}" class="btn btn-sm">${t('readEditorialBtn')}</a>
+                            <button
+                              type="button"
+                              class="btn btn-warning btn-sm regen-contest-tests-btn"
+                              data-contest-id="${c.id}"
+                              ${c.regeneratingTests ? 'disabled' : ''}
+                            >${c.regeneratingTests ? t('regeneratingTestsBtn') : t('regenTestsBtn')}</button>
                           </div>
                         </td>
                       </tr>`;
@@ -737,6 +831,14 @@ async function renderContestsDashboard() {
       }
     };
   }
+
+  const dashRegenBox = document.getElementById('dashboard-regen-progress-box');
+  document.querySelectorAll('.regen-contest-tests-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const cid = btn.getAttribute('data-contest-id');
+      await triggerContestRegenTests(cid, btn, dashRegenBox);
+    };
+  });
 }
 
 // View 2: Single Contest Page (Problems, Readiness Matrix, Virtual Participation, Scoreboard)
@@ -813,8 +915,24 @@ function renderContestViewFromData(contest) {
               ? `<button type="button" class="btn" disabled title="Locked during active Virtual Participation">${t('editorialLockedBtn')}</button>`
               : `<a href="#/editorial/${contest.contestId}" id="open-editorial-link" class="btn">${t('readEditorialBtn')}</a>`
           }
+          <button
+            type="button"
+            id="regen-contest-tests-btn"
+            class="btn btn-warning btn-sm"
+            ${contest.regeneratingTests ? 'disabled' : ''}
+          >${contest.regeneratingTests ? t('regeneratingTestsBtn') : t('regenTestsBtn')}</button>
           <button type="button" id="reimport-contest-btn" class="btn btn-sm">${t('reimportBtn')}</button>
         </div>
+      </div>
+
+      <div id="contest-regen-progress-box" class="${state.activeRegenProgress[contest.contestId] || contest.regeneratingTests ? '' : 'hidden'}" style="margin-top:0.85rem;">
+        ${
+          state.activeRegenProgress[contest.contestId]
+            ? renderRegenProgressHtml(state.activeRegenProgress[contest.contestId])
+            : contest.regeneratingTests
+              ? `<div class="alert alert-info">${escapeHtml(t('regenTestsProgressTitle'))} — #${contest.contestId}...</div>`
+              : ''
+        }
       </div>
 
       ${
@@ -992,6 +1110,7 @@ function renderContestViewFromData(contest) {
                         <td>
                           <div style="display:flex;gap:0.35rem;flex-wrap:wrap;">
                             <a href="#/problem/${p.id}" class="btn btn-primary btn-sm">Solve</a>
+                            <button type="button" class="btn btn-sm regen-prob-tests-btn" data-prob-id="${escapeHtml(p.id)}">${t('regenProbTestsBtn')}</button>
                             ${
                               hasIncomplete
                                 ? `<button type="button" class="btn btn-warning btn-sm repair-prob-btn" data-prob-id="${escapeHtml(p.id)}">${t('repairBtn')}</button>`
@@ -1114,6 +1233,14 @@ function renderContestViewFromData(contest) {
     };
   }
 
+  const regenContestBtn = document.getElementById('regen-contest-tests-btn');
+  const contestRegenBox = document.getElementById('contest-regen-progress-box');
+  if (regenContestBtn) {
+    regenContestBtn.onclick = async () => {
+      await triggerContestRegenTests(contest.contestId, regenContestBtn, contestRegenBox);
+    };
+  }
+
   const reimportBtn = document.getElementById('reimport-contest-btn');
   if (reimportBtn) {
     reimportBtn.onclick = async () => {
@@ -1126,6 +1253,22 @@ function renderContestViewFromData(contest) {
       await loadAndRenderContestView(contest.contestId);
     };
   }
+
+  document.querySelectorAll('.regen-prob-tests-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const pid = btn.getAttribute('data-prob-id');
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await apiFetch(`/api/problems/${pid}/repair`, {
+          method: 'POST',
+          body: JSON.stringify({ stage: 'test_prep' })
+        });
+      } finally {
+        await loadAndRenderContestView(contest.contestId);
+      }
+    };
+  });
 
   document.querySelectorAll('.repair-prob-btn').forEach((btn) => {
     btn.onclick = async () => {
@@ -2017,6 +2160,7 @@ async function renderSettingsView() {
         <div style="font-size:0.88rem;line-height:1.8;">
           <div><strong>Toolchain:</strong> <code>${escapeHtml(jEnv.toolchain || 'Not found')}</code></div>
           <div><strong>Compiler Path:</strong> <code>${escapeHtml(jEnv.compilerPath || '')}</code></div>
+          <div><strong>Python 3 Generator Runtime:</strong> <code>${escapeHtml(jEnv.pythonOk ? `Python ${jEnv.pythonVersion} · ${jEnv.pythonPath}` : (jEnv.pythonError || 'Not found'))}</code></div>
           <div><strong>Sandbox Runner:</strong> <code>${escapeHtml(jEnv.sandboxPath || '')}</code></div>
           <div><strong>AppContainer SID (CFOJ.Run):</strong> <code>${escapeHtml(jEnv.runContainerSid || '')}</code></div>
           <div><strong>Data Backup Path:</strong> <code>${escapeHtml(statusData.dataDir || '')}</code></div>
@@ -2091,6 +2235,10 @@ async function renderSettingsView() {
           <input type="text" id="set-compiler-path" value="${escapeHtml(s.compiler_path || '')}" />
         </label>
         <label style="display:flex;flex-direction:column;gap:0.35rem;">
+          <span>Python 3 Executable (for AI test generators)</span>
+          <input type="text" id="set-python-path" value="${escapeHtml(s.python_path || 'python')}" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:0.35rem;">
           <span>Offline Mode (Block all remote Codeforces fetches)</span>
           <select id="set-offline-mode">
             <option value="false" ${s.offline_mode !== 'true' ? 'selected' : ''}>Online / Normal</option>
@@ -2156,6 +2304,7 @@ async function renderSettingsView() {
           agy_bin: document.getElementById('set-agy-bin').value.trim(),
           target_test_count: document.getElementById('set-target-tests').value.trim(),
           compiler_path: document.getElementById('set-compiler-path').value.trim(),
+          python_path: document.getElementById('set-python-path').value.trim(),
           offline_mode: document.getElementById('set-offline-mode').value
         })
       });
@@ -2254,6 +2403,29 @@ function connectSseEvents() {
         refreshSystemStatus();
         if (location.hash.startsWith('#/contest/')) {
           handleRouteChange();
+        }
+      } else if (msg.type === 'importProgress' && msg.progress?.steps?.jobType === 'regenerate_tests') {
+        const prog = msg.progress;
+        state.activeRegenProgress[prog.contestId] = prog;
+        const contestBox = document.getElementById('contest-regen-progress-box');
+        if (contestBox && state.currentContest && Number(state.currentContest.contestId) === Number(prog.contestId)) {
+          contestBox.classList.remove('hidden');
+          contestBox.innerHTML = renderRegenProgressHtml(prog);
+        }
+        const dashBox = document.getElementById('dashboard-regen-progress-box');
+        if (dashBox) {
+          dashBox.classList.remove('hidden');
+          dashBox.innerHTML = renderRegenProgressHtml(prog);
+        }
+        if (prog.status === 'completed' || prog.status === 'partial' || prog.status === 'failed') {
+          refreshSystemStatus();
+          if (
+            (location.hash === `#/contest/${prog.contestId}`) ||
+            location.hash === '#/contests' ||
+            location.hash === ''
+          ) {
+            handleRouteChange();
+          }
         }
       } else if (msg.type === 'browserTransferReceived' || (msg.type === 'importProgress' && msg.progress?.status === 'completed')) {
         refreshSystemStatus();

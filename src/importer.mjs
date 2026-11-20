@@ -26,6 +26,11 @@ import { prepareProblemTestPackage } from './testgen.mjs';
 let lastRemoteFetchAt = 0;
 const MIN_REMOTE_INTERVAL_MS = 1200;
 const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const activeTestRegenContests = new Set();
+
+export function isContestTestRegenRunning(contestId) {
+  return activeTestRegenContests.has(Number(contestId));
+}
 
 export function parseContestIdInput(input) {
   const s = String(input ?? '').trim();
@@ -1514,6 +1519,137 @@ export async function repairProblemStage(problemId, stage = 'all', options = {})
     results,
     summary: getContestReadinessSummary(contestId)
   };
+}
+
+export async function regenerateContestTestData(contestIdInput, options = {}) {
+  const contestId = parseContestIdInput(contestIdInput);
+  const db = getDb();
+  const contest = db.prepare('SELECT * FROM contests WHERE id = ?').get(contestId);
+  if (!contest) {
+    const err = new Error(`Contest ${contestId} not found`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (activeTestRegenContests.has(contestId)) {
+    const err = new Error(`Test data regeneration is already running for contest #${contestId}.`);
+    err.statusCode = 409;
+    err.code = 'ALREADY_RUNNING';
+    throw err;
+  }
+
+  const providerName = options.provider || getSetting('ai_provider', 'codex');
+  const now = getNowMs();
+  const problemRows = db
+    .prepare('SELECT * FROM problems WHERE contest_id = ? ORDER BY sort_order ASC, problem_index ASC')
+    .all(contestId);
+
+  const jobInfo = db
+    .prepare(
+      'INSERT INTO import_jobs (contest_id, status, provider, steps_json, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(contestId, 'running', providerName, '{}', now, now);
+  const jobId = Number(jobInfo.lastInsertRowid);
+
+  const steps = {
+    jobType: 'regenerate_tests',
+    contestId,
+    provider: providerName,
+    totalProblems: problemRows.length,
+    completedProblems: 0,
+    problems: {}
+  };
+  for (const p of problemRows) {
+    steps.problems[p.problem_index] = {
+      index: p.problem_index,
+      problemId: p.id,
+      fetching: p.fetch_status || 'pending',
+      translation: p.translation_status || 'pending',
+      test_prep: p.fetch_status === 'ready' && p.statement_en_json ? 'pending' : 'skipped',
+      editorial_prep: p.editorial_prep_status || 'pending'
+    };
+  }
+
+  activeTestRegenContests.add(contestId);
+  const results = [];
+
+  try {
+    emitImportProgress(jobId, contestId, 'running', steps);
+
+    for (const prob of problemRows) {
+      const idx = prob.problem_index;
+      const freshProb = db.prepare('SELECT * FROM problems WHERE id = ?').get(prob.id);
+      if (!freshProb || freshProb.fetch_status !== 'ready' || !freshProb.statement_en_json) {
+        steps.problems[idx].test_prep = 'skipped';
+        steps.problems[idx].testPrepError = 'English statement not fetched yet';
+        steps.completedProblems++;
+        results.push({
+          problemId: prob.id,
+          index: idx,
+          ok: false,
+          skipped: true,
+          error: 'English statement not fetched yet'
+        });
+        emitImportProgress(jobId, contestId, 'running', steps);
+        continue;
+      }
+
+      steps.problems[idx].test_prep = 'running';
+      steps.problems[idx].testPrepError = null;
+      emitImportProgress(jobId, contestId, 'running', steps);
+
+      const tpRes = await prepareProblemTestPackage(freshProb, {
+        provider: providerName,
+        targetTestCount: options.targetTestCount,
+        executableOverride: options.executableOverride || null,
+        envOverride: options.envOverride || null
+      });
+
+      steps.problems[idx].test_prep = tpRes.ok
+        ? 'ready'
+        : tpRes.unsupported
+          ? 'unsupported'
+          : 'failed';
+      if (!tpRes.ok) steps.problems[idx].testPrepError = tpRes.error;
+      steps.completedProblems++;
+      results.push({
+        problemId: prob.id,
+        index: idx,
+        ...tpRes
+      });
+      emitImportProgress(jobId, contestId, 'running', steps);
+    }
+
+    const allOk =
+      results.length > 0 &&
+      results.every((r) => r.ok || r.unsupported);
+    const finalStatus = allOk ? 'completed' : 'partial';
+    emitImportProgress(jobId, contestId, finalStatus, steps);
+
+    return {
+      ok: allOk,
+      jobId,
+      contestId,
+      status: finalStatus,
+      provider: providerName,
+      results,
+      summary: getContestReadinessSummary(contestId)
+    };
+  } catch (err) {
+    emitImportProgress(jobId, contestId, 'failed', steps, err.message);
+    return {
+      ok: false,
+      jobId,
+      contestId,
+      status: 'failed',
+      provider: providerName,
+      error: err.message,
+      results,
+      summary: getContestReadinessSummary(contestId)
+    };
+  } finally {
+    activeTestRegenContests.delete(contestId);
+  }
 }
 
 export function getContestReadinessSummary(contestId) {

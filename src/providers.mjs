@@ -39,7 +39,7 @@ export const TEST_SUITE_SCHEMA = {
     'checkerEps',
     'checkerCpp',
     'checkerSelfTests',
-    'generatorCpp',
+    'generatorPy',
     'validatorCpp',
     'referenceCpp',
     'oracleCpp',
@@ -65,7 +65,7 @@ export const TEST_SUITE_SCHEMA = {
         }
       }
     },
-    generatorCpp: { type: 'string' },
+    generatorPy: { type: 'string' },
     validatorCpp: { type: 'string' },
     referenceCpp: { type: 'string' },
     oracleCpp: { type: 'string' },

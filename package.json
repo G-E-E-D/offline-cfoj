@@ -10,6 +10,7 @@
     "start": "node ./src/server.mjs",
     "test:milestone1": "node ./scripts/test-milestone1.mjs",
     "test:providers": "node --test ./scripts/test-provider-translation.mjs",
+    "test:testgen": "node --test ./scripts/test-python-testgen-and-regen.mjs",
     "test:import": "node ./scripts/test-contest-import-workflow.mjs",
     "test:acceptance": "node ./scripts/verify-acceptance.mjs"
   },

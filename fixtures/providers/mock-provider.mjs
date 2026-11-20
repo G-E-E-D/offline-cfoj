@@ -218,12 +218,11 @@ int main() {
       checkerEps: 1e-6,
       checkerCpp: '',
       checkerSelfTests: [],
-      generatorCpp: `#include <bits/stdc++.h>
-int main(int argc, char* argv[]) {
-    int seed = (argc > 1) ? std::atoi(argv[1]) : 1;
-    std::println("{}", 100000 + seed);
-    return 0;
-}`,
+      generatorPy: `import sys, random
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+rng = random.Random(seed)
+print(100000 + seed)
+`,
       validatorCpp: `#include <bits/stdc++.h>
 int main() {
     std::string tok;
@@ -262,13 +261,11 @@ int main() {
       checkerEps: 1e-6,
       checkerCpp: '',
       checkerSelfTests: [],
-      generatorCpp: `#include <bits/stdc++.h>
-int main(int argc, char* argv[]) {
-    int seed = (argc > 1) ? std::atoi(argv[1]) : 4;
-    int w = ((seed - 1) % 100 + 100) % 100 + 1;
-    std::println("{}", w);
-    return 0;
-}`,
+      generatorPy: `import sys
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 4
+w = ((seed - 1) % 100 + 100) % 100 + 1
+print(w)
+`,
       validatorCpp: `#include <bits/stdc++.h>
 int main() {
     long long w;
@@ -422,57 +419,48 @@ int main(int argc, char* argv[]) {
           shouldAccept: false
         }
       ],
-      generatorCpp: `#include <bits/stdc++.h>
-int main(int argc, char* argv[]) {
-    int seed = (argc > 1) ? std::atoi(argv[1]) : 1;
-    if (seed == 1) {
-        // Prompt acceptance test case: 2 3 / 1 2 / 1 2
-        std::println("2 3");
-        std::println("1 2");
-        std::println("1 2");
-        return 0;
-    }
-    if (seed == 2) {
-        std::println("1 0");
-        std::println("0 0");
-        return 0;
-    }
-    if (seed == 3) {
-        std::println("30 240");
-        for (int i = 0; i < 30; ++i) std::println("8 8");
-        return 0;
-    }
-    std::mt19937 rng(seed * 10007U + 42U);
-    int d = (seed <= 12) ? 30 : (1 + (seed % 30));
-    std::vector<int> mn(d), mx(d);
-    int sumMin = 0, sumMax = 0;
-    for (int i = 0; i < d; ++i) {
-        int a = rng() % 9;
-        int b = rng() % 9;
-        if (a > b) std::swap(a, b);
-        mn[i] = a;
-        mx[i] = b;
-        sumMin += a;
-        sumMax += b;
-    }
-    int sumTime = sumMin;
-    if (seed % 5 == 0) {
-        sumTime = std::max(0, sumMin - 1 - (seed % 3));
-    } else if (seed % 5 == 1) {
-        sumTime = std::min(240, sumMax + 1 + (seed % 3));
-    } else if (seed % 5 == 2) {
-        sumTime = sumMin;
-    } else if (seed % 5 == 3) {
-        sumTime = sumMax;
-    } else {
-        sumTime = sumMin + (sumMax > sumMin ? (rng() % (sumMax - sumMin + 1)) : 0);
-    }
-    std::println("{} {}", d, sumTime);
-    for (int i = 0; i < d; ++i) {
-        std::println("{} {}", mn[i], mx[i]);
-    }
-    return 0;
-}`,
+      generatorPy: `import sys, random
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+if seed == 1:
+    print("2 3")
+    print("1 2")
+    print("1 2")
+    raise SystemExit(0)
+if seed == 2:
+    print("1 0")
+    print("0 0")
+    raise SystemExit(0)
+if seed == 3:
+    print("30 240")
+    for _ in range(30):
+        print("8 8")
+    raise SystemExit(0)
+rng = random.Random(seed * 10007 + 42)
+d = 30 if seed <= 12 else 1 + (seed % 30)
+mn, mx = [], []
+for _ in range(d):
+    a = rng.randint(0, 8)
+    b = rng.randint(0, 8)
+    if a > b:
+        a, b = b, a
+    mn.append(a)
+    mx.append(b)
+sum_min = sum(mn)
+sum_max = sum(mx)
+if seed % 5 == 0:
+    sum_time = max(0, sum_min - 1 - (seed % 3))
+elif seed % 5 == 1:
+    sum_time = min(240, sum_max + 1 + (seed % 3))
+elif seed % 5 == 2:
+    sum_time = sum_min
+elif seed % 5 == 3:
+    sum_time = sum_max
+else:
+    sum_time = rng.randint(sum_min, sum_max)
+print(d, sum_time)
+for a, b in zip(mn, mx):
+    print(a, b)
+`,
       validatorCpp: `#include <bits/stdc++.h>
 int main() {
     int d, sumTime;
@@ -585,35 +573,28 @@ int main() {
       checkerEps: 1e-6,
       checkerCpp: '',
       checkerSelfTests: [],
-      generatorCpp: `#include <bits/stdc++.h>
-int main(int argc, char* argv[]) {
-    int seed = (argc > 1) ? std::atoi(argv[1]) : 1;
-    std::mt19937 rng(seed * 99991U + 17U);
-    if (seed == 1) {
-        std::println("1");
-        std::println("a");
-        return 0;
-    }
-    if (seed == 2) {
-        std::println("5");
-        for (int i = 0; i < 5; ++i) std::println("abcdefghijklmnopqrstuvwxyzabcdef");
-        return 0;
-    }
-    int n = (seed > 45) ? (200 + (seed - 45) * 30) : (3 + (seed * 7) % 120);
-    int poolSize = std::max(1, (seed % 7) + 1);
-    std::vector<std::string> pool(poolSize);
-    for (int i = 0; i < poolSize; ++i) {
-        int len = 1 + (rng() % 32);
-        std::string s(len, 'a');
-        for (int j = 0; j < len; ++j) s[j] = char('a' + (rng() % 26));
-        pool[i] = s;
-    }
-    std::println("{}", n);
-    for (int i = 0; i < n; ++i) {
-        std::println("{}", pool[rng() % poolSize]);
-    }
-    return 0;
-}`,
+      generatorPy: `import sys, random, string
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+rng = random.Random(seed * 99991 + 17)
+if seed == 1:
+    print(1)
+    print("a")
+    raise SystemExit(0)
+if seed == 2:
+    print(5)
+    for _ in range(5):
+        print("abcdefghijklmnopqrstuvwxyzabcdef")
+    raise SystemExit(0)
+n = (200 + (seed - 45) * 30) if seed > 45 else (3 + (seed * 7) % 120)
+pool_size = max(1, (seed % 7) + 1)
+pool = [
+    "".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(1, 32)))
+    for _ in range(pool_size)
+]
+print(n)
+for _ in range(n):
+    print(rng.choice(pool))
+`,
       validatorCpp: `#include <bits/stdc++.h>
 int main() {
     int n;
@@ -791,41 +772,31 @@ int main(int argc, char* argv[]) {
         shouldAccept: false
       }
     ],
-    generatorCpp: `#include <bits/stdc++.h>
-int main(int argc, char* argv[]) {
-    int seed = (argc > 1) ? std::atoi(argv[1]) : 1;
-    std::mt19937 rng(seed * 7919U + 101U);
-    if (seed == 1) {
-        // No envelope fits
-        std::println("3 10 10");
-        std::println("10 20");
-        std::println("20 10");
-        std::println("5 5");
-        return 0;
-    }
-    if (seed == 2) {
-        // Equal width trap: must sort height descending when widths are equal
-        std::println("4 2 2");
-        std::println("5 6");
-        std::println("5 10");
-        std::println("7 8");
-        std::println("9 9");
-        return 0;
-    }
-    int n = (seed > 45) ? (120 + (seed - 45) * 20) : (2 + (seed * 3) % 45);
-    long long w = 1 + (rng() % 50);
-    long long h = 1 + (rng() % 50);
-    std::println("{} {} {}", n, w, h);
-    for (int i = 0; i < n; ++i) {
-        long long wi = 1 + (rng() % 200);
-        long long hi = 1 + (rng() % 200);
-        if (seed % 6 == 0) {
-            wi = w; // boundary trap
-        }
-        std::println("{} {}", wi, hi);
-    }
-    return 0;
-}`,
+    generatorPy: `import sys, random
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+rng = random.Random(seed * 7919 + 101)
+if seed == 1:
+    print("3 10 10")
+    print("10 20")
+    print("20 10")
+    print("5 5")
+    raise SystemExit(0)
+if seed == 2:
+    print("4 2 2")
+    print("5 6")
+    print("5 10")
+    print("7 8")
+    print("9 9")
+    raise SystemExit(0)
+n = (120 + (seed - 45) * 20) if seed > 45 else (2 + (seed * 3) % 45)
+w = rng.randint(1, 50)
+h = rng.randint(1, 50)
+print(n, w, h)
+for _ in range(n):
+    wi = w if (seed % 6 == 0) else rng.randint(1, 200)
+    hi = rng.randint(1, 200)
+    print(wi, hi)
+`,
     validatorCpp: `#include <bits/stdc++.h>
 int main() {
     int n;
