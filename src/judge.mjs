@@ -171,6 +171,7 @@ export async function compileCpp23(sourceCode, targetDir = null, outName = 'solu
       '-O2',
       '-pipe',
       '-static',
+      '-s',
       '-Wl,--stack=67108864',
       '-o',
       exePath,
@@ -219,6 +220,13 @@ export async function compileCpp23(sourceCode, targetDir = null, outName = 'solu
     };
   }
 
+  // Grant CFOJ.Run read/execute access to the compile directory and binary once
+  spawnSync(SANDBOX_EXE, ['grant', 'CFOJ.Run', 'rx', workDir], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true
+  });
+
   return {
     ok: true,
     exePath,
@@ -234,12 +242,9 @@ export async function runSandboxedExecutable(exePath, inputContent, limits = {},
   const runDir = path.join(
     DATA_DIR,
     'tmp',
-    `run-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+    `run-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`
   );
   fs.mkdirSync(runDir, { recursive: true });
-
-  const localExe = path.join(runDir, path.basename(exePath));
-  fs.copyFileSync(exePath, localExe);
 
   const stdinPath = path.join(runDir, 'stdin.txt');
   const stdoutPath = path.join(runDir, 'stdout.txt');
@@ -258,7 +263,7 @@ export async function runSandboxedExecutable(exePath, inputContent, limits = {},
 
   const spec = {
     container: 'CFOJ.Run',
-    args: [localExe, ...(extraOpts.args || [])],
+    args: [exePath, ...(extraOpts.args || [])],
     cwd: runDir,
     env: ['SystemRoot=C:\\Windows'],
     stdinFile: stdinPath,
@@ -270,7 +275,8 @@ export async function runSandboxedExecutable(exePath, inputContent, limits = {},
     maxProcesses: 1,
     outputLimitBytes,
     stderrLimitBytes: 64 * 1024,
-    grantRW: [runDir]
+    grantRW: [runDir],
+    grantRX: [path.dirname(exePath)]
   };
 
   try {

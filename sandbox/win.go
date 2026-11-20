@@ -165,9 +165,19 @@ func utf16Ptr(s string) *uint16 {
 	return p
 }
 
-// appContainerSid creates (or reuses) a named AppContainer profile and returns its SID.
-// The profile has no capabilities, so processes inside it have no network access and can
-// only open objects whose ACL explicitly grants the container (or ALL APPLICATION PACKAGES).
+// deriveAppContainerSid computes the deterministic SID for an AppContainer name in memory
+// without locking or mutating the registry/profile directory.
+func deriveAppContainerSid(name string) (uintptr, error) {
+	var sid uintptr
+	r, _, _ := procDeriveAppContainerSidFromAppContainerName.Call(
+		uintptr(unsafe.Pointer(utf16Ptr(name))), uintptr(unsafe.Pointer(&sid)))
+	if r != 0 {
+		return 0, syscall.Errno(r)
+	}
+	return sid, nil
+}
+
+// appContainerSid ensures the named AppContainer profile exists and returns its canonical SID.
 func appContainerSid(name string) (uintptr, error) {
 	var createdSid uintptr
 	r, _, _ := procCreateAppContainerProfile.Call(
@@ -178,16 +188,11 @@ func appContainerSid(name string) (uintptr, error) {
 	if createdSid != 0 {
 		procFreeSid.Call(createdSid)
 	}
-	var sid uintptr
-	r2, _, _ := procDeriveAppContainerSidFromAppContainerName.Call(
-		uintptr(unsafe.Pointer(utf16Ptr(name))), uintptr(unsafe.Pointer(&sid)))
-	if r2 != 0 {
-		if r != 0 {
-			return 0, syscall.Errno(r)
-		}
-		return 0, syscall.Errno(r2)
+	sid, err := deriveAppContainerSid(name)
+	if err != nil && r != 0 {
+		return 0, syscall.Errno(r)
 	}
-	return sid, nil
+	return sid, err
 }
 
 func parseSid(s string) (uintptr, error) {

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Codeforces Beta Round 4 Tutorial - Codeforces</title>
+</head>
+<body>
+  <div class="topic" topicId="169">
+    <div class="title"><a href="https://codeforces.com/blog/entry/169">Codeforces Beta Round #4 (Div. 2 Only) Tutorial</a></div>
+    <div class="info">By <a class="rated-user" href="https://codeforces.com/profile/MikeMirzayanov">MikeMirzayanov</a></div>
+    <div class="content">
+      <div class="ttypography">
+        <h3>4A / Div. 2 A &mdash; Watermelon</h3>
+        <p>We need to check whether an integer $$$w$$$ ($$$1 \le w \le 100$$$) can be represented as the sum of two positive even integers $$$a + b = w$$$.</p>
+        <p>Since the sum of two even numbers is always even, any odd $$$w$$$ immediately yields <code>NO</code>. Furthermore, the smallest sum of two positive even integers is $$$2 + 2 = 4$$$, so $$$w = 2$$$ can only be split into $$$1 + 1$$$ (both odd) and must also output <code>NO</code>. For every even $$$w \ge 4$$$, we can choose $$$a = 2$$$ and $$$b = w - 2$$$, which are both positive even integers.</p>
+        <p>Time complexity: $$$O(1)$$$. Space complexity: $$$O(1)$$$.</p>
+        <img src="https://espresso.codeforces.com/4a-watermelon.svg" alt="Watermelon split diagram" />
+        <pre><code>#include &lt;bits/stdc++.h&gt;
+int main() {
+    int w;
+    std::cin &gt;&gt; w;
+    std::println("{}", (w % 2 == 0 &amp;&amp; w &gt; 2) ? "YES" : "NO");
+}</code></pre>
+
+        <h3>4B / Div. 2 B &mdash; Before an Exam</h3>
+        <p>Let $$$L = \sum_{i=1}^{d} minTime_i$$$ and $$$R = \sum_{i=1}^{d} maxTime_i$$$. Clearly, a valid schedule exists if and only if $$$L \le sumTime \le R$$$. If $$$sumTime &lt; L$$$ or $$$sumTime &gt; R$$$, output <code>NO</code>.</p>
+        <p>Otherwise, start by assigning $$$s_i = minTime_i$$$ for each day $$$i$$$, leaving $$$rem = sumTime - L$$$ hours to distribute. Iterate through $$$i = 1 \dots d$$$ and add $$$\delta_i = \min(rem, maxTime_i - minTime_i)$$$ to $$$s_i$$$, decreasing $$$rem$$$ by $$$\delta_i$$$. Because $$$sumTime \le R$$$, $$$rem$$$ reaches $$$0$$$ by the end of the loop.</p>
+        <p>Time complexity: $$$O(d)$$$. Space complexity: $$$O(d)$$$.</p>
+
+        <h3>4C / Div. 2 C &mdash; Registration System</h3>
+        <p>Maintain a hash map (or balanced binary search tree) <code>std::unordered_map&lt;std::string, int&gt; cnt</code> mapping each requested base username to the number of times it has been requested so far.</p>
+        <p>When username $$$s$$$ arrives: if <code>cnt[s] == 0</code>, output <code>OK</code> and increment <code>cnt[s]</code> to $$$1$$$. Otherwise, let $$$k = cnt[s]$$$, output $$$s + \text{to\_string}(k)$$$, and increment <code>cnt[s]</code>. Since the problem guarantees that input requests consist only of lowercase Latin letters (no digits), generated names containing digits can never collide with future raw input names.</p>
+        <p>Time complexity: $$$O(n \cdot |s|)$$$ expected. Space complexity: $$$O(n \cdot |s|)$$$.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

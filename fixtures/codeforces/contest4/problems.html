@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Problems - Codeforces Beta Round 4 (Div. 2 Only) - Codeforces</title>
+</head>
+<body>
+  <div id="sidebar">
+    <div class="roundbox sidebox sidebar-menu">
+      <div class="caption titled">&rarr; Contest materials</div>
+      <ul>
+        <li><a href="/blog/entry/168">Announcement</a></li>
+        <li><a href="/blog/entry/169">Tutorial (Editorial)</a></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="problemindexholder" problemindex="A">
+    <div class="ttypography">
+      <div class="problem-statement">
+        <div class="header">
+          <div class="title">A. Watermelon</div>
+          <div class="time-limit"><div class="property-title">time limit per test</div>1 second</div>
+          <div class="memory-limit"><div class="property-title">memory limit per test</div>64 megabytes</div>
+          <div class="input-file"><div class="property-title">input</div>standard input</div>
+          <div class="output-file"><div class="property-title">output</div>standard output</div>
+        </div>
+        <div>
+          <p>One hot summer day Pete and his friend Billy decided to buy a watermelon. They chose the biggest and the ripest one, in their opinion. After that the watermelon was weighed, and the scales showed $$$w$$$ kilos. They rushed home, dying of thirst, and decided to divide the berry, however they faced a hard problem.</p>
+          <p>Pete and Billy are great fans of even numbers, that's why they want to divide the watermelon in such a way that each of the two parts weighs even number of kilos, at the same time it is not obligatory that the parts are equal. The boys are extremely tired and want to start their meal as soon as possible, that's why you should help them and find out, if they can divide the watermelon in the way they want. For sure, each of them should get a part of positive weight.</p>
+          <center>
+            <img class="tex-graphics" src="https://espresso.codeforces.com/4a-watermelon.svg" alt="Watermelon division diagram" />
+          </center>
+          <table class="tex-tabular">
+            <thead>
+              <tr><th>Total Weight $$$w$$$</th><th>Valid Even Split $$$a + b = w$$$</th><th>Expected Verdict</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>$$$2$$$</td><td>Only $$$1 + 1$$$ (odd parts)</td><td><code>NO</code></td></tr>
+              <tr><td>$$$8$$$</td><td>$$$2 + 6$$$ or $$$4 + 4$$$</td><td><code>YES</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="input-specification">
+          <div class="section-title">Input</div>
+          <p>The first (and the only) input line contains integer number $$$w$$$ ($$$1 \le w \le 100$$$) &mdash; the weight of the watermelon bought by the boys.</p>
+        </div>
+        <div class="output-specification">
+          <div class="section-title">Output</div>
+          <p>Print <code>YES</code>, if the boys can divide the watermelon into two parts, each of them weighing even number of kilos; and <code>NO</code> in the opposite case.</p>
+        </div>
+        <div class="sample-tests">
+          <div class="section-title">Examples</div>
+          <div class="sample-test">
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>8
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>YES
+</pre>
+            </div>
+          </div>
+        </div>
+        <div class="note">
+          <div class="section-title">Note</div>
+          <p>For example, the boys can divide the watermelon into two parts of 2 and 6 kilos respectively (another variant &mdash; two parts of 4 and 4 kilos).</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="problemindexholder" problemindex="B">
+    <div class="ttypography">
+      <div class="problem-statement">
+        <div class="header">
+          <div class="title">B. Before an Exam</div>
+          <div class="time-limit"><div class="property-title">time limit per test</div>0.5 seconds</div>
+          <div class="memory-limit"><div class="property-title">memory limit per test</div>64 megabytes</div>
+          <div class="input-file"><div class="property-title">input</div>standard input</div>
+          <div class="output-file"><div class="property-title">output</div>standard output</div>
+        </div>
+        <div>
+          <p>Tomorrow Peter has a Biology exam. He does not like this subject much, but $$$d$$$ days ago he learned that he would have to take this exam. Peter's strict parents made him prepare for the exam immediately, for this purpose he has to study not less than $$$minTime_i$$$ and not more than $$$maxTime_i$$$ hours per each $$$i$$$-th day. Moreover, they warned Peter that a day before the exam they would check how he had followed their instructions.</p>
+          <p>So today is the day when Peter's parents ask him to show the timetable of his preparatory studies. But the boy has counted only the sum of hours $$$sumTime$$$ spent him on preparation, and now he wants to know if he can show his parents a timetable $$$s\_schedule$$$ with $$$d$$$ numbers, where each number $$$s_i$$$ stands for the time in hours spent by Peter each $$$i$$$-th day on biology studies, and satisfying the limitations imposed by his parents, and at the same time the sum total of all $$$s_i$$$ should equal to $$$sumTime$$$.</p>
+        </div>
+        <div class="input-specification">
+          <div class="section-title">Input</div>
+          <p>The first input line contains two integer numbers $$$d$$$, $$$sumTime$$$ ($$$1 \le d \le 30, 0 \le sumTime \le 240$$$) &mdash; the number of days, during which Peter studied, and the total amount of hours, spent on preparation. Each of the following $$$d$$$ lines contains two integer numbers $$$minTime_i$$$, $$$maxTime_i$$$ ($$$0 \le minTime_i \le maxTime_i \le 8$$$), separated by a space &mdash; minimum and maximum amount of hours that Peter could spend in the $$$i$$$-th day.</p>
+        </div>
+        <div class="output-specification">
+          <div class="section-title">Output</div>
+          <p>In the first line print <code>YES</code>, and in the second line print $$$d$$$ numbers (separated by a space), each of the numbers &mdash; amount of hours, spent by Peter on preparation in the corresponding day, if he followed his parents' instructions; or print <code>NO</code> in the unique line. If there are many solutions, print any of them.</p>
+        </div>
+        <div class="sample-tests">
+          <div class="section-title">Examples</div>
+          <div class="sample-test">
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>1 48
+5 7
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>NO
+</pre>
+            </div>
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>2 5
+0 1
+3 5
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>YES
+1 4 </pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="problemindexholder" problemindex="C">
+    <div class="ttypography">
+      <div class="problem-statement">
+        <div class="header">
+          <div class="title">C. Registration System</div>
+          <div class="time-limit"><div class="property-title">time limit per test</div>5 seconds</div>
+          <div class="memory-limit"><div class="property-title">memory limit per test</div>64 megabytes</div>
+          <div class="input-file"><div class="property-title">input</div>standard input</div>
+          <div class="output-file"><div class="property-title">output</div>standard output</div>
+        </div>
+        <div>
+          <p>A new e-mail service "Berlandesk" is going to be opened in Berland in the near future. The site administration wants to launch their project as soon as possible, that's why they ask you to help. You're suggested to implement the prototype of site registration system. The system should work on the following principle.</p>
+          <p>Each time a new user wants to register, he sends to the system a request with his name. If such a name does not exist in the system database, it is inserted into the database, and the user gets the response <code>OK</code>, confirming the successful registration. If the name already exists in the system database, the system makes up a new user name, sends it to the user as a prompt and also inserts the prompt into the database. The new name is formed by the following rule. Numbers, starting with 1, are appended one after another to name (<code>name1</code>, <code>name2</code>, ...), among these numbers the least $$$i$$$ is found so that <code>name</code>$$$i$$$ does not yet exist in the database.</p>
+        </div>
+        <div class="input-specification">
+          <div class="section-title">Input</div>
+          <p>The first line contains number $$$n$$$ ($$$1 \le n \le 10^5$$$). The following $$$n$$$ lines contain the requests to the system. Each request is a non-empty line, and consists of not more than 32 characters, which are all lowercase Latin letters.</p>
+        </div>
+        <div class="output-specification">
+          <div class="section-title">Output</div>
+          <p>Print $$$n$$$ lines, which are system responses to the requests: <code>OK</code> in case of successful registration, or a prompt with a new name, if the requested name is already taken.</p>
+        </div>
+        <div class="sample-tests">
+          <div class="section-title">Examples</div>
+          <div class="sample-test">
+            <div class="input">
+              <div class="title">Input</div>
+              <pre><div class="test-example-line test-example-line-0">4</div><div class="test-example-line test-example-line-0">abacaba</div><div class="test-example-line test-example-line-0">acaba</div><div class="test-example-line test-example-line-0">abacaba</div><div class="test-example-line test-example-line-0">acab</div></pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>OK
+OK
+abacaba1
+OK
+</pre>
+            </div>
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>6
+first
+first
+second
+second
+third
+third
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>OK
+first1
+OK
+second1
+OK
+third1
+</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="problemindexholder" problemindex="D">
+    <div class="ttypography">
+      <div class="problem-statement">
+        <div class="header">
+          <div class="title">D. Mysterious Present</div>
+          <div class="time-limit"><div class="property-title">time limit per test</div>1 second</div>
+          <div class="memory-limit"><div class="property-title">memory limit per test</div>64 megabytes</div>
+          <div class="input-file"><div class="property-title">input</div>standard input</div>
+          <div class="output-file"><div class="property-title">output</div>standard output</div>
+        </div>
+        <div>
+          <p>Peter decided to wish happy birthday to his friend from Australia and send him a card. To make his present more mysterious, he decided to make a <i>chain</i>. Chain here is such a sequence of envelopes $$$A = \{a_1, a_2, \dots, a_k\}$$$, where the width and the height of the $$$i$$$-th envelope is strictly higher than the width and the height of the $$$(i - 1)$$$-th envelope respectively. Chain size is the number of envelopes in the chain.</p>
+          <p>Peter wants to make the maximum size chain of the envelopes he has, the chain should be such, that he'll be able to put a card into it. The card fits into the chain if its width and height is lower than the width and the height of the smallest envelope in the chain respectively. It's forbidden to turn the card and the envelopes. Peter has very many envelopes and very little time, this hard task is entrusted to you.</p>
+          <center>
+            <img class="tex-graphics" src="https://espresso.codeforces.com/4d-envelopes.svg" alt="Nested envelopes chain diagram" />
+          </center>
+        </div>
+        <div class="input-specification">
+          <div class="section-title">Input</div>
+          <p>The first line contains integers $$$n$$$, $$$w$$$, $$$h$$$ ($$$1 \le n \le 5000$$$, $$$1 \le w, h \le 10^6$$$) &mdash; amount of envelopes Peter has, the card width and height respectively. Then there follow $$$n$$$ lines, each of them contains two integer numbers $$$w_i$$$ and $$$h_i$$$ &mdash; width and height of the $$$i$$$-th envelope ($$$1 \le w_i, h_i \le 10^6$$$).</p>
+        </div>
+        <div class="output-specification">
+          <div class="section-title">Output</div>
+          <p>In the first line print the maximum chain size. In the second line print the numbers of the envelopes (separated by space), forming the required chain, starting with the number of the smallest envelope. Remember, please, that the card should fit into the smallest envelope. If there are several answers of maximum size, print any of them. If the card does not fit into any of the envelopes, print number <code>0</code> in the single line.</p>
+        </div>
+        <div class="sample-tests">
+          <div class="section-title">Examples</div>
+          <div class="sample-test">
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>2 1 1
+2 2
+2 2
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>1
+1 </pre>
+            </div>
+            <div class="input">
+              <div class="title">Input</div>
+              <pre>3 3 3
+5 4
+12 11
+9 8
+</pre>
+            </div>
+            <div class="output">
+              <div class="title">Output</div>
+              <pre>3
+1 3 2 </pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

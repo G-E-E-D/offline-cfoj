@@ -39,6 +39,7 @@ type Spec struct {
 	OutputLimitBytes int64    `json:"outputLimitBytes"`
 	StderrLimitBytes int64    `json:"stderrLimitBytes"`
 	GrantRW          []string `json:"grantRW"`
+	GrantRX          []string `json:"grantRX"`
 	NoContainer      bool     `json:"noContainer"`
 }
 
@@ -239,14 +240,19 @@ func run(spec *Spec) Result {
 	var res Result
 	if !spec.NoContainer {
 		var err error
-		sid, err = appContainerSid(spec.Container)
+		sid, err = deriveAppContainerSid(spec.Container)
 		if err != nil {
-			return fail("cannot create AppContainer profile %q: %v", spec.Container, err)
+			return fail("cannot derive AppContainer SID %q: %v", spec.Container, err)
 		}
 		res.ContainerSid = sidString(sid)
 		for _, p := range spec.GrantRW {
 			if err := grantPath(p, sid, fileAllAccess); err != nil {
-				return fail("cannot grant sandbox access to %s: %v", p, err)
+				return fail("cannot grant sandbox RW access to %s: %v", p, err)
+			}
+		}
+		for _, p := range spec.GrantRX {
+			if err := grantPath(p, sid, fileGenericReadExecute); err != nil {
+				return fail("cannot grant sandbox RX access to %s: %v", p, err)
 			}
 		}
 	}
