@@ -17,7 +17,7 @@ Offline CFOJ is a self-contained local Codeforces practice judge and virtual con
   - **OpenAI Codex CLI** (`codex`), invoked via documented non-interactive mode:
     `codex exec --skip-git-repo-check --sandbox read-only --output-schema schema.json --output-last-message result.json -`
   - **Google Antigravity CLI** (`agy`), invoked via documented headless mode:
-    `agy -p - --output-format json --json-schema schema.json`
+    `agy --input-format stream-json --output-format stream-json --json-schema schema.json`
 
 ---
 

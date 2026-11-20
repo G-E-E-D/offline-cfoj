@@ -35,15 +35,19 @@ if (failMode === 'version_error') {
   process.exit(2);
 }
 
-// Parse CLI flags for codex exec vs agy -p
+// Parse CLI flags for codex exec vs agy headless mode
 let outputLastMessagePath = null;
 let schemaPath = null;
+let outputFormat = 'json';
 for (let i = 0; i < args.length; i++) {
   if ((args[i] === '--output-last-message' || args[i] === '-o') && args[i + 1]) {
     outputLastMessagePath = args[i + 1];
     i++;
   } else if ((args[i] === '--output-schema' || args[i] === '--json-schema') && args[i + 1]) {
     schemaPath = args[i + 1];
+    i++;
+  } else if (args[i] === '--output-format' && args[i + 1]) {
+    outputFormat = args[i + 1];
     i++;
   }
 }
@@ -54,6 +58,13 @@ try {
   stdinText = fs.readFileSync(0, 'utf8');
 } catch {
   stdinText = '';
+}
+if (process.env.CFOJ_TEST_STDIN_FILE) {
+  fs.writeFileSync(process.env.CFOJ_TEST_STDIN_FILE, stdinText, 'utf8');
+}
+
+if (failMode === 'hang') {
+  await new Promise((resolve) => setTimeout(resolve, 60000));
 }
 
 const materialsPath = path.join(process.cwd(), 'problem-materials.json');
@@ -1240,9 +1251,10 @@ if (mode === 'codex') {
   process.stdout.write(jsonText + '\n');
   process.exit(0);
 } else {
-  // Google Antigravity headless JSON envelope (`agy -p ... --output-format json --json-schema ...`)
+  // Google Antigravity headless JSON envelope (`agy --input-format stream-json --output-format stream-json`)
+  const conversationId = `agy-headless-${Date.now()}`;
   const envelope = {
-    conversation_id: `agy-headless-${Date.now()}`,
+    conversation_id: conversationId,
     status: 'SUCCESS',
     response: JSON.stringify(structuredResult),
     duration_seconds: 0.35,
@@ -1254,6 +1266,11 @@ if (mode === 'codex') {
       total_tokens: Math.max(64, stdinText.length) + 512
     }
   };
-  process.stdout.write(JSON.stringify(envelope) + '\n');
+  if (outputFormat === 'stream-json') {
+    process.stdout.write(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { mode: 'mock' } }) + '\n');
+    process.stdout.write(JSON.stringify({ event: 'result', result: envelope }) + '\n');
+  } else {
+    process.stdout.write(JSON.stringify(envelope) + '\n');
+  }
   process.exit(0);
 }

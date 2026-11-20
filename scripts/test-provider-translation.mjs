@@ -9,8 +9,14 @@ import { validateTranslatedStatement } from '../src/statement.mjs';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cfoj translation '));
 process.env.CFOJ_DATA_DIR = temp;
 const { getDb, setSetting, ROOT_DIR } = await import('../src/db.mjs');
-const { getFixtureExecutable, runProviderStructuredJob, TRANSLATION_SCHEMA, validateModelSettings } =
-  await import('../src/providers.mjs');
+const {
+  extractAntigravityEnvelope,
+  getFixtureExecutable,
+  runProviderStructuredJob,
+  TEST_SUITE_SCHEMA,
+  TRANSLATION_SCHEMA,
+  validateModelSettings
+} = await import('../src/providers.mjs');
 after(() => {
   getDb().close();
   fs.rmSync(temp, { recursive: true, force: true });
@@ -87,4 +93,64 @@ test('a missing CLI cannot silently translate a real contest with a demo', async
     problemMaterials: { contestId: 2272, statement: en },
     executableOverride: path.join(temp, 'missing.exe')
   }), err => err.code === 'PROVIDER_NOT_INSTALLED');
+});
+
+test('antigravity uses stream-json stdin with inline materials (never -p -) and cleans up on timeout', async () => {
+  setSetting('agy_model', '');
+  setSetting('agy_effort', '');
+  fs.copyFileSync(path.join(ROOT_DIR, 'fixtures/providers/mock-provider.mjs'), path.join(temp, 'mock-provider.mjs'));
+  const exe = path.join(temp, path.basename(getFixtureExecutable('antigravity')));
+  fs.copyFileSync(getFixtureExecutable('antigravity'), exe);
+  const argvFile = path.join(temp, 'agy-stream-argv.json');
+  const stdinFile = path.join(temp, 'agy-stream-stdin.txt');
+
+  const res = await runProviderStructuredJob({
+    providerName: 'antigravity',
+    taskType: 'test_suite',
+    problemMaterials: { contestId: 4, problemIndex: 'A', title: 'Watermelon', timeLimitMs: 1000, memoryLimitMb: 64, statement: en },
+    schema: TEST_SUITE_SCHEMA,
+    promptText: 'Build deterministic test suite.',
+    executableOverride: exe,
+    envOverride: { CFOJ_TEST_ARGV_FILE: argvFile, CFOJ_TEST_STDIN_FILE: stdinFile }
+  });
+  assert.ok(res.data.generatorCpp);
+
+  const argv = JSON.parse(fs.readFileSync(argvFile, 'utf8'));
+  assert.equal(argv[argv.indexOf('--input-format') + 1], 'stream-json');
+  assert.equal(argv[argv.indexOf('--output-format') + 1], 'stream-json');
+  assert.ok(!argv.includes('-p'), 'Must not pass literal -p - to agy');
+
+  const stdinLine = fs.readFileSync(stdinFile, 'utf8').trim();
+  const ndjson = JSON.parse(stdinLine);
+  assert.equal(ndjson.event, 'user');
+  assert.equal(ndjson.message.role, 'user');
+  assert.ok(ndjson.message.content.includes('Build deterministic test suite.'));
+  assert.ok(ndjson.message.content.includes('No tools are needed'));
+  assert.ok(ndjson.message.content.includes('Count the integers in the list.'));
+
+  // extractAntigravityEnvelope supports both single JSON objects and NDJSON streams
+  const singleEnv = extractAntigravityEnvelope(JSON.stringify({ status: 'SUCCESS', structured_output: { ok: 1 } }));
+  assert.equal(singleEnv.structured_output.ok, 1);
+  const ndjsonEnv = extractAntigravityEnvelope([
+    JSON.stringify({ event: 'init', init: {} }),
+    JSON.stringify({ event: 'result', result: { status: 'SUCCESS', structured_output: { ok: 2 } } })
+  ].join('\n'));
+  assert.equal(ndjsonEnv.structured_output.ok, 2);
+
+  // Timeout terminates child process tree and cleans up temp jobDir
+  await assert.rejects(
+    runProviderStructuredJob({
+      providerName: 'antigravity',
+      taskType: 'test_suite',
+      problemMaterials: { contestId: 4, problemIndex: 'A', statement: en },
+      schema: TEST_SUITE_SCHEMA,
+      executableOverride: exe,
+      envOverride: { CFOJ_MOCK_PROVIDER_FAIL: 'hang' },
+      timeoutMs: 600
+    }),
+    err => err.code === 'PROVIDER_EXEC_ERROR' && err.message.includes('timed out')
+  );
+  const tmpRoot = path.join(temp, 'tmp');
+  const leftover = fs.existsSync(tmpRoot) ? fs.readdirSync(tmpRoot).filter(n => n.startsWith('ai-antigravity-')) : [];
+  assert.deepEqual(leftover, [], 'Timed-out job directory must be cleaned up without EBUSY leaks');
 });
