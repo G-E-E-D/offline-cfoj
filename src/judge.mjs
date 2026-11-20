@@ -490,12 +490,23 @@ function previewText(s, maxLen = 400) {
 // Sequential submission execution queue
 const submissionQueue = [];
 let queueActive = false;
+let queuePaused = false;
+
+export function setQueuePaused(paused) {
+  queuePaused = Boolean(paused);
+  if (!queuePaused) {
+    processQueue();
+  }
+  return queuePaused;
+}
 
 export function enqueueSubmission(submissionId) {
   if (!submissionQueue.includes(submissionId)) {
     submissionQueue.push(submissionId);
   }
-  processQueue();
+  if (!queuePaused) {
+    processQueue();
+  }
 }
 
 export function recoverInterruptedSubmissions() {
@@ -513,9 +524,9 @@ export function recoverInterruptedSubmissions() {
 }
 
 async function processQueue() {
-  if (queueActive) return;
+  if (queueActive || queuePaused) return;
   queueActive = true;
-  while (submissionQueue.length > 0) {
+  while (submissionQueue.length > 0 && !queuePaused) {
     const subId = submissionQueue.shift();
     try {
       await judgeSingleSubmission(subId);

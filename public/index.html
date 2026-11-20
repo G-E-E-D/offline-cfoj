@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Offline CFOJ — Local Codeforces Practice &amp; Virtual Contest Judge</title>
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar" role="banner">
+    <div class="topbar-inner">
+      <div class="brand-group">
+        <a href="#/contests" class="brand-logo" id="nav-brand">
+          <span class="brand-badge">CFOJ</span>
+          <span class="brand-title" data-i18n="appTitle">Offline CFOJ</span>
+        </a>
+        <span class="env-pill" id="env-status-pill" title="Local Judge Backend">GNU C++23</span>
+      </div>
+
+      <nav class="main-nav" aria-label="Main Navigation">
+        <a href="#/contests" class="nav-link" id="nav-contests" data-i18n="navContests">Contests</a>
+        <a href="#/problemset" class="nav-link" id="nav-problemset" data-i18n="navProblemset">Problemset</a>
+        <a href="#/submissions" class="nav-link" id="nav-submissions" data-i18n="navSubmissions">Submissions</a>
+        <a href="#/settings" class="nav-link" id="nav-settings" data-i18n="navSettings">Settings &amp; Providers</a>
+      </nav>
+
+      <div class="topbar-actions">
+        <div id="active-vp-banner-pill" class="vp-top-pill hidden"></div>
+        <button
+          type="button"
+          id="lang-toggle-btn"
+          class="btn btn-lang"
+          aria-label="Switch Interface and Statement Language"
+        >
+          <span id="lang-toggle-label">EN / 中文</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app-main" class="app-main" role="main"></main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">Submission Details</h3>
+        <button type="button" id="modal-close-btn" class="btn btn-sm" aria-label="Close">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
